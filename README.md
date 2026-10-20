@@ -77,7 +77,32 @@ details, no usage data, no contract terms. Show every draft in a table and send 
 
 ## Play 5 · Website visitor → email sequence (hot)
 
-_coming in Task 4_
+**Temperature:** hot. They are on your site right now.
+
+**Job:** reach the companies that just looked at pricing, demo or case study pages, the same day, with copy that fits the page.
+
+**Steps**
+1. One time: GetLeads MCP `get_wallet_balance`, then `start_website_visitor_tracking(domain)`, paste the install snippet into `<head>`, `configure_website_pixel` (webhook and privacy), then `complete_website_pixel_setup` (needs auto top-up). Update your privacy policy and consent first. People are named mostly for US and Canadian visitors; elsewhere expect the company only.
+2. Daily: `export_website_visitor_leads` (or `list_website_visitor_leads view=unique`) into `data/visitors_<date>.csv`. Check the header for the page column; `page` below is an example.
+3. Keep high-intent pages: `uv run python -m outbound.filter data/visitors_<date>.csv --out out/visitors_intent.csv --keep-regex 'page=pricing|demo|case-stud|compar|vs-'`, then `--suppress data/crm_export.csv`.
+4. Claude scores each company against `CLAUDE.md`. For ICP companies with no named person, `lookup_decision_makers` finds the buyer by your titles. Rows with no verified email go through `uv run python -m outbound.waterfall`.
+5. Derive `page_topic` from the page URL (for example "pricing for multi-seat teams"). The copy never says you saw the visit.
+6. Show the table. Day 1 is always a dry run: `uv run python -m outbound.push_smartlead out/visitors_final.csv --campaign-id ID --custom first_line,page_topic --dry-run`. After approval push for real, and run `send_contacts_to_heyreach` with `dry_run: true` first. One email tool per lead.
+
+`configure_website_visitors_smartlead` can auto-push to Smartlead, but it has no filter, no suppression and no approval step, so it is not the default.
+
+**Prompt to paste**
+```
+Run the Play 5 skill. Export today's visitors with export_website_visitor_leads into data/visitors_<date>.csv, check the header
+for the page column, keep pricing|demo|case-stud|compar|vs- pages with outbound.filter, suppress against data/crm_export.csv,
+and score each company against CLAUDE.md. Use lookup_decision_makers for ICP companies without a named person, outbound.waterfall
+for missing emails, and derive page_topic from the page URL. Never mention that we saw the visit. Show me the table.
+Day 1 is a dry run only (push_smartlead --dry-run, send_contacts_to_heyreach dry_run true). Send nothing until I approve.
+```
+
+**Why it works:** intent is concentrated on a few pages. HockeyStack measured 3.8% form-fill on pricing pages against 1.1% site-wide. A suppressed, ICP-scored, verified list with a `page_topic` that fits the page beats blasting everyone the pixel catches.
+
+**What you get:** `out/visitors_final.csv` of ICP-fit, unsuppressed visitors with a verified email and a `page_topic`, a dry-run payload to inspect, and `.pushed.csv` recording what went to Smartlead and when. Run it daily.
 
 ## Build order
 

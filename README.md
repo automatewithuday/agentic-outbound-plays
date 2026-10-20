@@ -48,7 +48,32 @@ _coming in Task 6_
 
 ## Play 4 · Champion reactivation (warm)
 
-_coming in Task 3_
+**Temperature:** warm. They already know and like you.
+
+**Job:** reach past champions who just started a new job, while the move is fresh (14 to 45 days).
+
+**Steps**
+1. Put `name,email,linkedin_url,old_company,old_company_domain,role` in `data/champions.csv` (see `data/champions.example.csv`). Only people you actually helped.
+2. Check for moves with Deepline: `deepline plays run prebuilt/job-change-check --csv data/champions.csv --columns.company_domain old_company_domain --max-credits N`. It costs 1.96 credits only per `moved` row. Statuses: `moved | no_change | left_company | unknown | profile_unavailable | no_new_company`.
+3. Keep fresh movers: `uv run python -m outbound.filter out/champions_checked.csv --out out/movers.csv --keep-regex 'job_change.status=^moved$' --days job_change.date=14..45 --neq job_change.new_company,old_company`.
+4. GetLeads `lookup_company` on each new employer; Claude drops anyone outside the `CLAUDE.md` ICP with a one-line reason.
+5. Find the new email with `uv run python -m outbound.waterfall`. If the champion is not the buyer, GetLeads `lookup_decision_makers` adds the budget owner.
+6. Suppress against your CRM: `uv run python -m outbound.filter ... --suppress data/crm_export.csv`.
+7. Draft each email opening `Congrats on {{new_company}}. Remember when we helped you at {{old_company}}?` plus two short lines. No account details. Run it every Monday and send nothing until you approve.
+
+**Prompt to paste**
+```
+Run the Play 4 skill. Read data/champions.csv and CLAUDE.md. Check each champion with
+deepline plays run prebuilt/job-change-check (5 rows first, always --max-credits), keep status moved with a move date 14 to 45 days old and a
+different new company, drop non-ICP employers with a one-line reason, find the new email with outbound.waterfall, add the
+budget owner if the champion is not the buyer, and suppress against data/crm_export.csv. Draft one email per champion that
+opens exactly: Congrats on {{new_company}}. Remember when we helped you at {{old_company}}? then two short lines, no account
+details, no usage data, no contract terms. Show every draft in a table and send nothing until I approve.
+```
+
+**Why it works:** 91% of past champions have not come back on their own three months into a new job (UserGems 2023), and new executives convert 2.5x better in their first three months. You pay only when someone actually moved, and the message references a real shared history instead of a pitch.
+
+**What you get:** `out/movers_final.csv` with fresh, ICP-fit, unsuppressed champions, a `.dropped.csv` beside each filter step showing why rows left, and a table of drafts to approve.
 
 ## Play 5 · Website visitor → email sequence (hot)
 

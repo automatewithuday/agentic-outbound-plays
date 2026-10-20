@@ -73,7 +73,7 @@ with a linkedin_url to HeyReach. Each lead gets email from one tool only. Send n
 - The copy never reveals the visit. `page_topic` informs the offer only.
 - Update the privacy policy and consent before the pixel goes live. Respect the privacy settings in `configure_website_pixel`.
 - Only `verified` goes to Smartlead. `catch_all` and `unknown` are refused by `push_smartlead.py` unless you pass `--allow-status`, and never allow `catch_all`. `--only-status catch_all` is an explicit override and must never be used for a live sequence.
-- A row whose `pushed_to` is already set (`smartlead` in any campaign, or another email tool) is refused, so nothing is sent twice. To deliberately re-push, clear the `pushed_to` column.
+- A row whose `pushed_to` is already set (`smartlead` in any campaign, or another email tool) is refused, so nothing is sent twice. To deliberately re-push, clear the `pushed_to` column. If a push fails partway, just re-run the same command; rows recorded in `<in>.pushed.csv` are skipped.
 - One email tool per lead. A row already pushed to another email tool is refused.
 - `configure_website_visitors_smartlead` is GetLeads' auto-push to Smartlead. It is not the default here: it has no page filter, no CRM suppression and no approval step, so it would email everyone the pixel identifies.
 - Wallet spend is real money. Check `get_wallet_balance` first and report the balance after.

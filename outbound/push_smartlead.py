@@ -25,20 +25,24 @@ def _lead(r, custom):
 
 
 def push(rows, campaign_id, custom=(), allowed=("verified",), dry_run=False, api_key=None, out=None):
-    """Return (pushed_rows, refused) where refused is [(row, reason)]. A failed batch raises RuntimeError (no URL or key in it); batches already sent are in `out` if given."""
+    """Return (pushed_rows, refused) where refused is [(row, reason)]. A failed batch raises RuntimeError (no URL or key in it); `out` accumulates every pushed row across runs and its emails are skipped on re-run."""
     ok, refused = [], []
+    prior = c.read_csv(out) if out and Path(out).exists() else []  # record of earlier (possibly partial) runs
+    done = {(r.get("email") or "").strip().lower() for r in prior}
     for r in rows:
         tool = (r.get("pushed_to") or "").strip().lower()
         if not (r.get("email") or "").strip():
             refused.append((r, "no_email"))
         elif (r.get("email_status") or "").strip().lower() not in allowed:
             refused.append((r, f"status_{r.get('email_status') or 'missing'}"))
-        elif tool == "smartlead":
+        elif tool == "smartlead" or r["email"].strip().lower() in done:
             refused.append((r, "already_pushed:smartlead"))  # any campaign: no double sends; clear pushed_to to re-push on purpose
         elif tool:
             refused.append((r, f"already_in_{tool}"))
         else:
             ok.append(r)
+    if done and (n := sum(w == "already_pushed:smartlead" for _, w in refused)):
+        print(f"skipped {n} already-pushed rows (pushed_to column or {out})")
     pushed, url, now = [], URL.format(id=campaign_id), datetime.now(timezone.utc).isoformat(timespec="seconds")
     for i, chunk in enumerate(c.batches(ok, BATCH)):
         payload = {"lead_list": [_lead(r, custom) for r in chunk], "settings": SETTINGS}
@@ -50,12 +54,12 @@ def push(rows, campaign_id, custom=(), allowed=("verified",), dry_run=False, api
             try:
                 post(url, payload, {"api_key": api_key or c.env("SMARTLEAD_API_KEY")})  # params, so errors never carry the key
             except httpx.HTTPStatusError as e:
-                raise RuntimeError(f"smartlead: HTTP {e.response.status_code} for campaign {campaign_id}: {e.response.text[:300]}") from None
+                raise RuntimeError(f"smartlead: HTTP {e.response.status_code} for campaign {campaign_id}: {e.response.text[:300]}; {len(pushed)} rows pushed this run") from None
             except httpx.RequestError as e:
-                raise RuntimeError(f"smartlead: {type(e).__name__} for campaign {campaign_id}") from None
+                raise RuntimeError(f"smartlead: {type(e).__name__} for campaign {campaign_id}; {len(pushed)} rows pushed this run") from None
         pushed += [{**r, "pushed_to": "smartlead", "campaign_id": campaign_id, "pushed_at": now} for r in chunk]
         if out and not dry_run:
-            c.write_csv(out, pushed)  # incremental: a later failed batch keeps what already went out
+            c.write_csv(out, c.dedupe(prior + pushed, ["email"]))  # union, never shrinks; a later failed batch keeps what went out
     return pushed, refused
 
 
@@ -79,8 +83,7 @@ def main():
     try:
         pushed, refused = push(rows, a.campaign_id, custom, split(a.only_status) + split(a.allow_status), a.dry_run, out=out)
     except RuntimeError as e:
-        n = len(c.read_csv(out)) if Path(out).exists() else 0
-        sys.exit(f"{e}\nstopped mid-push; {n} rows already pushed are in {out}")
+        sys.exit(f"{e}\nstopped mid-push; re-run the same command to continue (pushed rows are recorded in {out})")
     for r, why in refused:
         print(f"refused {r.get('email') or '<blank>'}: {why}")
     print(f"{'would push' if a.dry_run else 'pushed'} {len(pushed)} of {len(rows)} rows in {-(-len(pushed) // BATCH)} request(s); refused {len(refused)}; {c.report()}")
@@ -133,6 +136,12 @@ def selftest():
             assert e.code != 0 and "100 rows" in str(e.code) and "SECRET" not in str(e.code)
         assert len(c.read_csv(str(src) + ".pushed.csv")) == 100
         post = lambda url, payload, params=None: calls.append((url, payload, params)) or {"ok": True}
+        calls.clear(); c._reset()  # run 2, same input: only the remaining 150 are sent, file is the union
+        with contextlib.redirect_stdout(io.StringIO()):
+            main()
+        assert [len(p["lead_list"]) for _, p, _ in calls] == [100, 50]
+        got = [r["email"] for r in c.read_csv(str(src) + ".pushed.csv")]
+        assert len(got) == 250 == len(set(got)) and got[:100] == [f"p{i}@x.com" for i in range(100)]
         # dry-run: no POST
         calls.clear(); c._reset(dry=True)
         with contextlib.redirect_stdout(io.StringIO()):

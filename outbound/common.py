@@ -1,0 +1,356 @@
+"""Shared helpers for all Plays: env, disk cache, spend ledger, HTTP/CLI wrappers, CSV, dedupe, suppression."""
+import argparse, csv, hashlib, json, os, subprocess, sys, time
+from collections import defaultdict
+from datetime import date
+from pathlib import Path
+
+import httpx
+from dotenv import load_dotenv
+
+ROOT = Path(__file__).resolve().parent.parent
+CACHE_PATH = ROOT / ".cache" / "calls.jsonl"
+
+
+# ---- env ----
+def load_env():
+    load_dotenv(ROOT / ".env")
+
+
+def env(name, required=True):
+    v = os.environ.get(name, "")
+    if required and not v:
+        raise RuntimeError(f"{name} is not set (put it in .env; see .env.example)")
+    return v or None
+
+
+# ---- disk cache ----
+def _sha(key):
+    return hashlib.sha256(key.encode()).hexdigest()
+
+
+def cached(key, fn, max_age_days=None):
+    """Return fn() once per key; replays from .cache/calls.jsonl at $0. Stale entries (older than max_age_days) refetch."""
+    k, hit = _sha(key), None
+    if CACHE_PATH.exists():
+        for line in CACHE_PATH.read_text().splitlines():  # ponytail: full-file scan per call, fine to ~100k entries
+            e = json.loads(line)
+            if e["k"] == k:
+                hit = e  # last write wins
+    if hit and (max_age_days is None or time.time() - hit["t"] <= max_age_days * 86400):
+        return hit["v"]
+    v = fn()
+    CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with CACHE_PATH.open("a") as f:
+        f.write(json.dumps({"k": k, "t": time.time(), "v": v}) + "\n")
+    return v
+
+
+# ---- spend ledger ----
+SPENT = {"usd": 0.0, "calls": [], "cap": None, "dry_run": False}
+
+
+class SpendCapExceeded(RuntimeError):
+    pass
+
+
+def set_cap(usd):
+    SPENT["cap"] = usd
+
+
+def set_dry_run(flag):
+    SPENT["dry_run"] = bool(flag)
+
+
+def spend(usd, label):
+    """Record a call. Raises before the call that would push (real + planned) spend over the cap."""
+    planned = sum(c["usd"] for c in SPENT["calls"] if c["planned"])
+    projected = SPENT["usd"] + planned + usd
+    if SPENT["cap"] is not None and projected > SPENT["cap"]:
+        raise SpendCapExceeded(f"{label}: projected ${projected:.4f} would exceed cap ${SPENT['cap']:.4f}; aborting before the call")
+    dry = SPENT["dry_run"]
+    SPENT["calls"].append({"label": label, "usd": usd, "planned": dry})
+    if not dry:
+        SPENT["usd"] += usd
+
+
+def report():
+    by = defaultdict(float)
+    for c in SPENT["calls"]:
+        by[c["label"]] += c["usd"]
+    planned = sum(c["usd"] for c in SPENT["calls"] if c["planned"])
+    head = f"planned ${planned:.4f} (dry-run, nothing spent)" if SPENT["dry_run"] else f"spent ${SPENT['usd']:.4f}"
+    return head + f" over {len(SPENT['calls'])} calls; by label: " + ", ".join(f"{k} ${v:.4f}" for k, v in sorted(by.items()))
+
+
+def _call(key, usd, label, fn):
+    """Common path for every paid wrapper: dry-run records and returns None; else cached, spending only on a miss."""
+    if SPENT["dry_run"]:
+        spend(usd, label)  # ponytail: dry-run counts a cached call at full price (conservative)
+        return None
+
+    def run():
+        spend(usd, label)
+        return fn()
+
+    return cached(key, run)
+
+
+# ---- API wrappers ----
+def _json_key(*a):
+    return json.dumps(a, sort_keys=True, default=str)
+
+
+def getleads(method, path, json=None, params=None, usd=0.0, label="getleads"):
+    # Verified against https://app.getleads.io/openapi.json: paths under /api/v1, Bearer auth accepted.
+    def fn():
+        r = httpx.request(method, "https://app.getleads.io" + path, json=json, params=params, timeout=120,
+                          headers={"Authorization": f"Bearer {env('GETLEADS_API_KEY')}"})
+        r.raise_for_status()
+        return r.json()
+
+    return _call(_json_key("getleads", method, path, json, params), usd, label, fn)
+
+
+def apify(actor, run_input, max_usd):
+    """Run an actor synchronously and return dataset items. actor like 'user~name'. Apify enforces maxTotalChargeUsd."""
+    def fn():
+        r = httpx.post(f"https://api.apify.com/v2/acts/{actor}/run-sync-get-dataset-items",
+                       params={"maxTotalChargeUsd": max_usd}, json=run_input, timeout=330,
+                       headers={"Authorization": f"Bearer {env('APIFY_API_TOKEN')}"})
+        r.raise_for_status()
+        return r.json()
+
+    return _call(_json_key("apify", actor, run_input, max_usd), max_usd, f"apify:{actor}", fn)
+
+
+def listeningkit(path, params=None):
+    def fn():
+        base = (env("LISTENINGKIT_BASE_URL", required=False) or "https://log.listeningkit.com").rstrip("/")
+        r = httpx.get(base + path,
+                      params=params, timeout=60, headers={"Authorization": f"Bearer {env('LISTENINGKIT_API_KEY')}"})
+        r.raise_for_status()
+        return r.json()
+
+    return _call(_json_key("listeningkit", path, params), 0.0, "listeningkit", fn)
+
+
+def _deepline(argv):
+    p = subprocess.run(argv, capture_output=True, text=True)
+    if p.returncode:
+        raise RuntimeError(f"{' '.join(argv[:4])} failed ({p.returncode}): {p.stderr.strip()[-500:]}")
+    return json.loads(p.stdout)
+
+
+def deepline_play(play_id, *, csv_path=None, input=None, usd_estimate=0.0):
+    # argv from `deepline plays run --help` (v0.3.397): --input <json|@file>, --json. csv goes in the play input as "csv".
+    payload = dict(input or {})
+    if csv_path:
+        payload["csv"] = str(csv_path)
+    argv = ["deepline", "plays", "run", play_id, "--input", json.dumps(payload), "--json"]
+    return _call(_json_key("play", argv), usd_estimate, f"deepline:{play_id}", lambda: _deepline(argv))
+
+
+def deepline_action(action_id, params, usd_estimate):
+    # No `deepline actions run` exists in 0.3.397; the equivalent is `deepline tools execute <id> --input <json> --json`.
+    argv = ["deepline", "tools", "execute", action_id, "--input", json.dumps(params), "--json"]
+    return _call(_json_key("action", argv), usd_estimate, f"deepline:{action_id}", lambda: _deepline(argv))
+
+
+# ---- CSV ----
+def read_csv(path):
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        return list(csv.DictReader(f))
+
+
+def write_csv(path, rows, fieldnames=None):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if fieldnames is None:
+        fieldnames = list(dict.fromkeys(k for r in rows for k in r))
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        w.writeheader()
+        w.writerows(rows)
+
+
+# ---- email status ----
+STATUS = ("verified", "catch_all", "unknown", "not_found")
+VERIFIER_MAP = {
+    "valid": "verified", "catch_all": "catch_all", "valid_catch_all": "catch_all", "unknown": "unknown",
+    **{k: "discard" for k in ("invalid", "disposable", "spamtrap", "abuse", "do_not_mail")},
+}
+
+
+def normalize_status(raw):
+    """Deepline email_status -> verified|catch_all|unknown|discard. Unmapped values become 'unknown' (never goes live)."""
+    return VERIFIER_MAP.get(str(raw or "").strip().lower(), "unknown")
+
+
+# ---- list hygiene ----
+def dedupe(rows, keys):
+    """First wins, case-insensitive. `keys` is ONE composite key; call again with another key list to dedupe on it too.
+    Rows with any blank key part are kept (they can't be identified)."""
+    seen, out = set(), []
+    for r in rows:
+        k = tuple((r.get(c) or "").strip().lower() for c in keys)
+        if all(k):
+            if k in seen:
+                continue
+            seen.add(k)
+        out.append(r)
+    return out
+
+
+_TRUE = {"1", "true", "yes", "y", "t"}
+_FREEMAIL = {"gmail.com", "outlook.com", "hotmail.com", "yahoo.com", "icloud.com", "proton.me", "protonmail.com"}
+
+
+def _li(u):
+    return (u or "").strip().lower().split("?")[0].rstrip("/")
+
+
+def suppress(rows, crm_rows, touched_days=14, today=None):
+    """Return (kept, dropped). Drop a row matching (email | linkedin_url | domain) a CRM row that is an open opp,
+    in a sequence, a customer, or touched within touched_days. Dropped rows get `suppress_reason`."""
+    today = today or date.today()
+    idx = {"email": {}, "li": {}, "domain": {}}
+    for c in crm_rows:
+        reasons = []
+        if (c.get("stage") or "").strip().lower() == "open":
+            reasons.append("open_opportunity")
+        if (c.get("in_sequence") or "").strip().lower() in _TRUE:
+            reasons.append("in_sequence")
+        if (c.get("is_customer") or "").strip().lower() in _TRUE:
+            reasons.append("customer")
+        lt = (c.get("last_touched") or "").strip()[:10]
+        if lt and (today - date.fromisoformat(lt)).days <= touched_days:
+            reasons.append(f"touched_within_{touched_days}d")
+        if not reasons:
+            continue
+        email = (c.get("email") or "").strip().lower()
+        dom = (c.get("domain") or email.split("@")[-1]).strip().lower()
+        for table, val in (("email", email), ("li", _li(c.get("linkedin_url"))), ("domain", dom)):
+            if val and not (table == "domain" and val in _FREEMAIL):
+                idx[table].setdefault(val, reasons[0])  # ponytail: reports first reason only
+    kept, dropped = [], []
+    for r in rows:
+        email = (r.get("email") or "").strip().lower()
+        dom = (r.get("company_domain") or r.get("domain") or email.split("@")[-1]).strip().lower()
+        why = idx["email"].get(email) or idx["li"].get(_li(r.get("linkedin_url"))) or idx["domain"].get(dom)
+        (dropped if why else kept).append({**r, "suppress_reason": why} if why else r)
+    return kept, dropped
+
+
+def batches(rows, size):
+    for i in range(0, len(rows), size):
+        yield rows[i:i + size]
+
+
+# ---- CLI ----
+def cli_common(parser):
+    parser.add_argument("--dry-run", action="store_true", help="print planned calls + cost estimate; spend nothing")
+    parser.add_argument("--cap-usd", type=float, help="abort before any call that would exceed this total")
+    parser.add_argument("--out", help="output path")
+    parser.add_argument("--selftest", action="store_true", help="run offline self-test and print OK")
+    return parser
+
+
+def apply_cli(args):
+    """Wire parsed cli_common flags into the ledger."""
+    set_dry_run(args.dry_run)
+    if args.cap_usd is not None:
+        set_cap(args.cap_usd)
+
+
+# ---- selftest ----
+def _reset(cap=None, dry=False):
+    SPENT.update(usd=0.0, calls=[], cap=cap, dry_run=dry)
+
+
+def selftest():
+    import tempfile
+    global CACHE_PATH
+    CACHE_PATH = Path(tempfile.mkdtemp()) / "calls.jsonl"
+
+    # cache hit/miss/max_age
+    n = []
+    f = lambda: n.append(1) or len(n)
+    assert cached("a", f) == 1 and cached("a", f) == 1 and len(n) == 1
+    assert cached("b", f) == 2
+    assert cached("a", f, max_age_days=1) == 1 and len(n) == 2  # fresh
+    time.sleep(0.01)
+    assert cached("a", f, max_age_days=0.0000001) == 3 and len(n) == 3  # stale -> refetch
+    assert cached("a", f) == 3  # newest entry wins
+
+    # ledger: cap at the right projection
+    _reset(cap=1.0)
+    spend(0.6, "x"); spend(0.4, "x")  # exactly at cap is allowed
+    try:
+        spend(0.01, "y"); raise AssertionError("cap not enforced")
+    except SpendCapExceeded as e:
+        assert "y" in str(e) and "1.01" in str(e) and "1.00" in str(e), str(e)
+    assert abs(SPENT["usd"] - 1.0) < 1e-9 and "x $1.0000" in report()
+    # dry-run: planned, not counted, cap on projection, wrappers return None
+    _reset(cap=1.0, dry=True)
+    assert getleads("POST", "/api/v1/enrich/from-linkedin", json={}, usd=0.4, label="gl") is None
+    assert apify("u~a", {}, 0.4) is None
+    assert listeningkit("/x") is None
+    assert SPENT["usd"] == 0.0 and len(SPENT["calls"]) == 3 and all(c["planned"] for c in SPENT["calls"])
+    try:
+        deepline_action("some_action", {}, 0.4); raise AssertionError("dry-run cap not enforced")
+    except SpendCapExceeded:
+        pass
+    assert deepline_play("p", csv_path="x.csv", usd_estimate=0.1) is None and "planned" in report()
+    # live path: spends only on cache miss
+    _reset(cap=None)
+    k = []
+    assert _call("live", 0.5, "t", lambda: k.append(1) or "r") == "r" and _call("live", 0.5, "t", lambda: 1 / 0) == "r"
+    assert SPENT["usd"] == 0.5 and k == [1]
+    _reset()
+
+    # normalize_status
+    for raw, want in [("valid", "verified"), ("catch_all", "catch_all"), ("valid_catch_all", "catch_all"), ("unknown", "unknown"),
+                      ("invalid", "discard"), ("disposable", "discard"), ("spamtrap", "discard"), ("abuse", "discard"),
+                      ("do_not_mail", "discard"), ("VALID", "verified"), ("weird", "unknown"), (None, "unknown")]:
+        assert normalize_status(raw) == want, raw
+
+    # dedupe
+    rows = [{"first_name": "A", "last_name": "B", "company_domain": "X.com", "linkedin_url": "L1"},
+            {"first_name": "a", "last_name": "b", "company_domain": "x.com", "linkedin_url": "l1"},
+            {"first_name": "c", "last_name": "d", "company_domain": "y.com", "linkedin_url": ""},
+            {"first_name": "c", "last_name": "d", "company_domain": "y.com", "linkedin_url": ""},
+            {"first_name": "e", "last_name": "f", "company_domain": "z.com", "linkedin_url": "L1"}]
+    r1 = dedupe(rows, ["linkedin_url"])
+    assert [r["first_name"] for r in r1] == ["A", "c", "c"]  # first wins, blanks kept
+    assert [r["first_name"] for r in dedupe(r1, ["first_name", "last_name", "company_domain"])] == ["A", "c"]
+
+    # suppress: each of four reasons + a kept row
+    t = date(2026, 10, 21)
+    crm = [{"email": "o@a.com", "stage": "open"},
+           {"email": "s@b.com", "in_sequence": "TRUE"},
+           {"linkedin_url": "https://linkedin.com/in/cust/", "is_customer": "true"},
+           {"domain": "recent.com", "last_touched": "2026-10-10"},
+           {"email": "old@old.com", "last_touched": "2026-01-01", "stage": "won"}]
+    people = [{"email": "O@a.com"}, {"email": "s@b.com"}, {"linkedin_url": "https://LINKEDIN.com/in/cust?x=1"},
+              {"email": "someone@recent.com"}, {"email": "old@old.com"}]
+    kept, dropped = suppress(people, crm, today=t)
+    assert kept == [{"email": "old@old.com"}]
+    assert [d["suppress_reason"] for d in dropped] == ["open_opportunity", "in_sequence", "customer", "touched_within_14d"]
+
+    # batches + csv round trip
+    assert list(batches([1, 2, 3, 4, 5], 2)) == [[1, 2], [3, 4], [5]]
+    p = Path(tempfile.mkdtemp()) / "sub" / "o.csv"
+    write_csv(p, [{"a": "1", "b": "x"}]); assert read_csv(p) == [{"a": "1", "b": "x"}]
+    # cli
+    a = cli_common(argparse.ArgumentParser()).parse_args(["--dry-run", "--cap-usd", "2"])
+    assert a.dry_run and a.cap_usd == 2.0
+    print("OK")
+
+
+if __name__ == "__main__":
+    a = cli_common(argparse.ArgumentParser(description=__doc__)).parse_args()
+    if a.selftest:
+        selftest()
+    else:
+        print("nothing to do; use --selftest")
+        sys.exit(2)

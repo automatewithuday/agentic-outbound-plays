@@ -1,0 +1,11 @@
+.env
+.cache/
+out/
+data/*
+!data/*.example.csv
+!data/transcripts/
+data/transcripts/*
+!data/transcripts/.gitkeep
+.superpowers/
+__pycache__/
+.venv/

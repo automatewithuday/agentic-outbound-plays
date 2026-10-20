@@ -1,0 +1,4 @@
+email,domain,linkedin_url,stage,in_sequence,last_touched,is_customer
+open@example.com,example.com,https://www.linkedin.com/in/open-example,open,false,2026-08-01,false
+seq@example.org,example.org,https://www.linkedin.com/in/seq-example,,true,2026-10-15,false
+cust@example.net,example.net,https://www.linkedin.com/in/cust-example,won,false,2026-01-10,true

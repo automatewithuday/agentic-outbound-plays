@@ -17,6 +17,7 @@ def load_env():
 
 
 def env(name, required=True):
+    load_env()  # idempotent; lets scripts that forget load_env() still read .env
     v = os.environ.get(name, "")
     if required and not v:
         raise RuntimeError(f"{name} is not set (put it in .env; see .env.example)")
@@ -33,7 +34,10 @@ def cached(key, fn, max_age_days=None):
     k, hit = _sha(key), None
     if CACHE_PATH.exists():
         for line in CACHE_PATH.read_text().splitlines():  # ponytail: full-file scan per call, fine to ~100k entries
-            e = json.loads(line)
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue  # truncated line from a killed run
             if e["k"] == k:
                 hit = e  # last write wins
     if hit and (max_age_days is None or time.time() - hit["t"] <= max_age_days * 86400):
@@ -188,7 +192,8 @@ def normalize_status(raw):
 
 # ---- list hygiene ----
 def dedupe(rows, keys):
-    """First wins, case-insensitive. `keys` is ONE composite key; call again with another key list to dedupe on it too.
+    """First wins, case-insensitive. `keys` is ONE composite key (ALL listed columns must match). To dedupe on two key
+    sets, call twice, e.g. dedupe(dedupe(rows, ["linkedin_url"]), ["first_name", "last_name", "company_domain"]).
     Rows with any blank key part are kept (they can't be identified)."""
     seen, out = set(), []
     for r in rows:
@@ -281,6 +286,9 @@ def selftest():
     time.sleep(0.01)
     assert cached("a", f, max_age_days=0.0000001) == 3 and len(n) == 3  # stale -> refetch
     assert cached("a", f) == 3  # newest entry wins
+    with CACHE_PATH.open("a") as fh:
+        fh.write('{"k": "trunc\n')  # corrupt line must not break later hits
+    assert cached("a", f) == 3 and cached("b", f) == 2 and len(n) == 3
 
     # ledger: cap at the right projection
     _reset(cap=1.0)
@@ -323,6 +331,8 @@ def selftest():
     r1 = dedupe(rows, ["linkedin_url"])
     assert [r["first_name"] for r in r1] == ["A", "c", "c"]  # first wins, blanks kept
     assert [r["first_name"] for r in dedupe(r1, ["first_name", "last_name", "company_domain"])] == ["A", "c"]
+
+    assert len(dedupe([{"a": "1", "b": "x"}, {"a": "1", "b": "y"}, {"a": "1", "b": "X"}], ["a", "b"])) == 2  # both must match
 
     # suppress: each of four reasons + a kept row
     t = date(2026, 10, 21)

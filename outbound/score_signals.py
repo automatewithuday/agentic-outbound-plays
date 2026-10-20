@@ -31,7 +31,8 @@ def score(tam, signals, cfg, today):
             warn["unknown party"] += 1
             continue
         try:
-            age = (today - date.fromisoformat((s.get("event_date") or "").strip())).days
+            ev = date.fromisoformat((s.get("event_date") or "").strip())
+            age = (today - ev).days
         except ValueError:
             warn["blank/malformed event_date"] += 1
             continue
@@ -41,13 +42,13 @@ def score(tam, signals, cfg, today):
         if d not in tam_doms:
             warn["domain not in TAM"] += 1
             continue
-        key = (d, t, s["event_date"].strip())
+        key = (d, t, ev.isoformat())
         if key in seen:  # same event from another source: keep the first, but prefer one that has a source_url
             warn["duplicate"] += 1
             if not seen[key]["source_url"] and s.get("source_url"):
-                seen[key].update(source_url=s["source_url"], party=p)
+                seen[key].update(source_url=s["source_url"])
             continue
-        seen[key] = dict(d=d, type=t, party=p, date=s["event_date"].strip(), source_url=(s.get("source_url") or "").strip())
+        seen[key] = dict(d=d, type=t, party=p, date=ev.isoformat(), source_url=(s.get("source_url") or "").strip())
         fresh.append(seen[key])
     by = {}
     for f in fresh:
@@ -96,16 +97,19 @@ def selftest():
         rows, w = score(tam, sigs, cfg, T)
         return {r["company_domain"]: r for r in rows}, w
 
-    # window boundaries, both ends, inclusive (funding is [14, 28])
-    r, w = run([sig("a.com", "funding", "third", n) for n in (13, 14)] + [sig("b.com", "funding", "third", n) for n in (28, 29)])
-    assert r["a.com"]["signal_count"] == 1 and r["a.com"]["signals"].startswith(f"funding@{ago(14)}")
+    # window boundaries, both ends, inclusive (funding is [0, 28], hiring [0, 14])
+    r, w = run([sig("a.com", "funding", "third", n) for n in (-1, 0)] + [sig("b.com", "funding", "third", n) for n in (28, 29)])
+    assert r["a.com"]["signal_count"] == 1 and r["a.com"]["signals"].startswith(f"funding@{ago(0)}")
     assert r["b.com"]["signal_count"] == 1 and r["b.com"]["signals"].startswith(f"funding@{ago(28)}")
     assert w["outside freshness window"] == 2
+    r, w = run([sig("c.com", "hiring", "third", n) for n in (0, 14, 15)])
+    assert r["c.com"]["signal_count"] == 2 and w["outside freshness window"] == 1
     # future date is outside a [0, N] window too
     assert run([sig("a.com", "news", "third", -1)])[0]["a.com"]["signal_count"] == 0
     # dedupe across sources: same (domain, type, date) -> one signal, first with a source_url wins
     r, w = run([sig("c.com", "funding", "third", 20, ""), sig("c.com", "funding", "third", 20, "http://x/1"), sig("c.com", "funding", "third", 20, "http://x/2")])
     assert r["c.com"]["signal_count"] == 1 and r["c.com"]["score"] == 10 and r["c.com"]["signals"] == f"funding@{ago(20)}<http://x/1>", r["c.com"]
+    assert run([sig("c.com", "funding", "third", 20, "http://x/1", ), sig("c.com", "funding", "second", 20, ev=ago(20) + " ")])[0]["c.com"]["signal_count"] == 1
     # cap at max_score: 3 first-party + 1 third = 130 -> 100
     r, _ = run([sig("d.com", "engagement", "first", n) for n in (1, 2, 3)] + [sig("d.com", "news", "third", 1)])
     assert r["d.com"]["score"] == 100 and r["d.com"]["signal_count"] == 4 and r["d.com"]["band"] == "work_today"

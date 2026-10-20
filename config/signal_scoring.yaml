@@ -3,10 +3,11 @@ weights:
   first_party: 40
   second_party: 25
   third_party: 10
+# crm_closed_lost and transcript_mention have no window (always fresh); score_signals.py implements this as NO_WINDOW.
 freshness_days:
   job_change: [14, 45]
-  funding: [14, 28]
-  hiring: [7, 14]
+  funding: [0, 28]
+  hiring: [0, 14]
   news: [0, 30]
   social_intent: [0, 14]
   website_visit: [0, 7]

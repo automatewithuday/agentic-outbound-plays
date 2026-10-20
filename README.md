@@ -14,7 +14,29 @@ Based on Michel Lieben's article "Here's how to Generate Leads With 5 Agentic Ou
 
 ## Play 1 · Waterfall email finder (cold)
 
-_coming in Task 2_
+**Temperature:** cold. They have never heard of you.
+
+**Job:** stop settling for 40% email coverage. Coverage is the ceiling for every other Play.
+
+**Steps**
+1. Put `first_name,last_name,company_domain,linkedin_url` in `data/leads.csv` (see `data/leads.example.csv`).
+2. Check `get_fair_use` on the GetLeads MCP, then dry-run: `uv run python -m outbound.waterfall data/leads.csv --out out/leads_enriched.csv --dry-run`.
+3. Run it in batches of 150: GetLeads, then Deepline `prebuilt/person-to-email-batch`; add `--deep` for FullEnrich on the leftovers only.
+4. Every email is verified (MillionVerifier, BounceBan once if catch-all). `verified` stops the waterfall, `catch_all` and `unknown` are stored with their status and stop, `discard` tries the next provider, nothing left is `not_found`.
+5. Read `out/leads_enriched.csv.report.md`. Only `verified` goes to Smartlead; the rest go to a LinkedIn-only track.
+
+**Prompt to paste**
+```
+Read data/leads.csv, dedupe, run uv run python -m outbound.waterfall data/leads.csv --out out/leads_enriched.csv --batch 150 --dry-run
+and show me the plan. After I approve, run it for real: stop at the first verified email per row, never build an
+email from a naming pattern, write out/leads_enriched.csv (email, email_status, email_provider, verifier, mx_class, miss_reason),
+and report % verified / % catch-all / % unknown / % not found, hits per provider and spend.
+Catch-all and unknown never go to Smartlead. Wait for my approval before pushing.
+```
+
+**Why it works:** no single vendor covers every region, so chaining them lifts coverage. GetLeads charges only on a hit, so the cheap first step costs nothing on misses, and the stop rule means you pay for the next provider only when needed.
+
+**What you get:** `out/leads_enriched.csv` with every input row kept plus the six email columns, and a report with coverage percentages and spend. Aim for bounces under 2%.
 
 ## Play 2 · Signal scoring (warm)
 

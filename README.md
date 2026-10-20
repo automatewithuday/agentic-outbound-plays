@@ -68,7 +68,38 @@ For work_today accounts find 2 buyers each by CLAUDE.md titles. State the cost b
 
 ## Play 3 · LinkedIn post engagers (warm)
 
-_coming in Task 6_
+**Temperature:** warm. They just raised a hand on a post about your topic.
+
+**Job:** turn the people who commented on or reacted to a post (yours, a partner's or a competitor's) into tiered outreach, within a day of a post that performs.
+
+**Steps**
+1. Input one post URL. For ongoing monitoring of your own and partner profiles: GetLeads `estimate_scrape_cost`, then `add_monitored_profile(linkedin_profile_url, billing_choice)`, then `list_profile_monitoring_leads` (paid from wallet cash).
+2. Run `deepline plays describe prebuilt/linkedin-post-to-engagers-harvestapi` first, then `deepline plays run prebuilt/linkedin-post-to-engagers-harvestapi --input '{"post_url": "<url>"}' --max-credits N --run-id-file out/engagers_run_<post-id>.json` and `deepline runs export <run-id> --out out/engagers_<post-id>.csv`. Fallbacks: GetLeads `scrape_linkedin_post_once(post_url)` (wallet cash) or Apify `harvestapi~linkedin-post-reactions` / `harvestapi~linkedin-post-comments`. Columns: `name,linkedin_url,headline,engagement (comment|reaction),comment_text`.
+3. Dedupe: `uv run python -m outbound.filter out/engagers_<post-id>.csv --out out/engagers_dedup.csv --dedupe-on linkedin_url` (count posts per person first if you pulled several).
+4. Cheap-first enrich: test the buyer titles from `CLAUDE.md` against `headline` with `outbound.filter --keep-regex`; only matching rows get Deepline `harvestapi_get_profile` (0.05 credits) and GetLeads `lookup_company`.
+5. Tier with Claude (for more than 30 rows, tier in batches of 10 with a cheap sub-agent (Haiku), then spot-check 5): T1 ICP account + buyer title + engaged on more than one post or commented; T2 ICP account + buyer or influencer title; T3 ICP account, other roles; Out = outside the ICP. Writes `tier,tier_reason`.
+6. Suppress against `data/crm_export.csv`. A T1 person a rep already owns becomes an alert line, not outreach.
+7. Find emails for tiers 1 to 3 with `uv run python -m outbound.waterfall`.
+8. Write one first line each from the post topic plus one recent company event (Play 2 signals if you have them). One sentence, no flattery.
+9. Show the table and drafts. After approval: T1 to HeyReach via `send_contacts_to_heyreach` (`dry_run` first) and Smartlead with `push_smartlead --custom first_line`; T2 and T3 to Smartlead only. One email tool per lead.
+
+**Prompt to paste**
+```
+Run the Play 3 skill. Post URL: <paste>. Read CLAUDE.md for the ICP and buyer titles. Run deepline plays describe
+prebuilt/linkedin-post-to-engagers-harvestapi, then run it with --max-credits and export to out/engagers_<post-id>.csv.
+Dedupe on linkedin_url with outbound.filter. Match buyer titles against headline first and run harvestapi_get_profile only on
+matching rows; get the company with lookup_company. Tier everyone (T1 ICP + buyer title + commented or multi-post, T2 ICP + buyer or
+influencer, T3 ICP other roles, Out) with tier and tier_reason. Suppress against data/crm_export.csv; T1 people a rep owns become an
+alert line. Find emails for tiers 1 to 3 with outbound.waterfall. Write one first line each from the post topic plus one recent
+company event, no flattery. Show me the list and drafts. After I approve: T1 to HeyReach (send_contacts_to_heyreach, dry_run first)
+and Smartlead, T2 and T3 to Smartlead only, one email tool per lead. Send nothing until I approve.
+```
+
+**Why it works:** someone who commented on your topic this week has already shown interest, and the message can name two real things: what they engaged with and what is happening at their company. Cheap-first enrichment means you pay for a profile only when the headline already looks like a buyer.
+
+**What you get:** `out/engagers_final.csv` with tiered, ICP-fit, unsuppressed engagers who have a verified email and a `first_line`, an alert line for any T1 a rep owns, and a drafts table to approve.
+
+**Guardrail:** LinkedIn's User Agreement prohibits scraping and automated activity, and accounts that use such tools risk restriction. Keep volume low and prefer your own and partner posts.
 
 ## Play 4 · Champion reactivation (warm)
 
@@ -132,22 +163,44 @@ linkedin_url, and each lead gets email from one tool only. Send nothing until I 
 
 ## Build order
 
-1. Setup — keys, MCP and CLAUDE.md first; every Play depends on them.
-2. Play 1 — cheapest, proves the cost and suppression plumbing on a plain list.
-3. Play 4 — your own past champions; the warmest list with the least data work.
-4. Play 5 — hot intent; small volume, highest reply rate.
-5. Play 2 — needs scoring rules tuned against your results from Plays 1, 4 and 5.
-6. Play 3 — post scraping is the most variable cost; do it last with a tight cap.
+1. Setup: keys, MCP and `CLAUDE.md` first; every Play depends on them.
+2. Play 1: cheapest, and it proves the cost and suppression plumbing on a plain list.
+3. Play 4: your own past champions are the warmest list with the least data work.
+4. Play 5: hot intent; small volume, highest reply rate.
+5. Play 2: scoring needs weights tuned against your results from Plays 1, 4 and 5.
+6. Play 3: post scraping is the most variable cost; do it last with a tight cap.
 
 ## Rhythm
 
-_to be filled in a later task_
+| Play | When |
+|---|---|
+| 1 Waterfall email finder | Every time you get a new list |
+| 2 Signal scoring | Weekly |
+| 3 LinkedIn post engagers | Within a day of every post that performs |
+| 4 Champion reactivation | Every Monday |
+| 5 Website visitors | Daily |
 
 ## Guardrails
 
-- First 100 contacts, then inspect before scaling.
-- Batches of 100-200 rows; `/compact` between batches.
-- Approvals stay on for anything that sends.
+- First 100 contacts, then inspect before scaling. Test every Play with one company or 5 rows first.
+- Batches of 100 to 200 rows; `/compact` between batches.
+- Approvals stay on for anything that sends. Every skill ends with a table, your approval, and only then a push.
+- Spend caps are real: `--cap-usd` on scripts, `--max-credits` on Deepline, `estimate_scrape_cost` before any monitored profile. Check `get_fair_use` and `get_wallet_balance` first. Never loop around a cap.
+- Only `verified` emails reach Smartlead. Catch-all and unknown stay out of live sequences. One email tool per lead.
+- Suppression runs before every push: open opportunities, active sequences, recent touches and customers come from `data/crm_export.csv`.
+- LinkedIn scraping (Play 3) and visitor identification (Play 5) carry platform and privacy risk. Read the guardrails in each skill.
+- Secrets live in `.env` only. Never paste keys into prompts or commit them.
+
+## What's different from the article
+
+| Play | Article (ColdIQ) | This repo |
+|---|---|---|
+| 1 | `find_email` | GetLeads, then Deepline `prebuilt/person-to-email-batch`, verified by MillionVerifier / BounceBan (`outbound.waterfall`) |
+| 2 | `find_signals` | GetLeads signals and `search_contacts`, Apify job search, optional ListeningKit, `outbound.score_signals` |
+| 3 | `extract_post_engagement` + Trigify monitoring | Deepline `prebuilt/linkedin-post-to-engagers-harvestapi`, GetLeads `add_monitored_profile` |
+| 4 | Job-change signals | Deepline `prebuilt/job-change-check` |
+| 5 | `setup_website_visitors` | GetLeads website pixel and `export_website_visitor_leads` |
+| Sending | Instantly (email), lemlist (LinkedIn and email) | Smartlead (email), HeyReach through GetLeads (LinkedIn) |
 
 ## Prefer ColdIQ?
 

@@ -49,7 +49,7 @@ Daily loop:
 13. Find emails for the rest: `uv run python -m outbound.waterfall out/visitors_need_email.csv --out out/visitors_enriched.csv --dry-run`, then for real after the user agrees to the plan. Merge into one file: `uv run python -c "from outbound import common as c; c.write_csv('out/visitors_final.csv', c.read_csv('out/visitors_verified.csv') + c.read_csv('out/visitors_enriched.csv'))"`.
 14. Add a `page_topic` column to `out/visitors_final.csv` per row from the page URL, for example `/pricing?seats=10` becomes `pricing for multi-seat teams`. The copy never says "I saw you visit". When a second signal exists (a Play 2 score, a Play 3 engagement), use it for the opener and let `page_topic` shape the offer.
 15. Show the table and wait for explicit approval. **Day 1 is always a dry run**: `uv run python -m outbound.push_smartlead out/visitors_final.csv --campaign-id ID --custom first_line,page_topic --dry-run`. It prints the first payload and which rows were refused.
-16. After approval, push for real: `uv run python -m outbound.push_smartlead out/visitors_final.csv --campaign-id ID --custom first_line,page_topic` (writes `out/visitors_final.csv.pushed.csv` after each batch). Then LinkedIn for rows without a verified email: `send_contacts_to_heyreach` with `dry_run: true`, show the result, then the real call. One email tool per lead.
+16. After approval, push for real: `uv run python -m outbound.push_smartlead out/visitors_final.csv --campaign-id ID --custom first_line,page_topic` (writes `out/visitors_final.csv.pushed.csv` after each batch). Then LinkedIn: `send_contacts_to_heyreach` with `dry_run: true` on the rows that have a `linkedin_url`, show the result, then the real call. Smartlead gets only `verified` rows. HeyReach gets ICP rows that have a `linkedin_url`, whatever their email status (LinkedIn is the channel for catch_all, unknown and not_found rows, and a parallel touch for the others). Each lead gets email from one tool only; LinkedIn plus email for the same person is allowed.
 
 ## Prompt to paste
 
@@ -57,11 +57,14 @@ Daily loop:
 Run the Play 5 skill every day. Read CLAUDE.md for the ICP and titles. Export visitors with export_website_visitor_leads
 (or list_website_visitor_leads view unique) into data/visitors_<date>.csv. Check the export header for the page column,
 then keep high-intent pages: uv run python -m outbound.filter ... --keep-regex 'page=pricing|demo|case-stud|compar|vs-'.
-Suppress against data/crm_export.csv. Score each company against the ICP and drop the rest with a one-line reason.
-For ICP companies without a named person, run lookup_decision_makers with the CLAUDE.md titles. Run outbound.waterfall on
-rows with no verified email. Derive page_topic from the page URL, and never mention that we saw the visit.
-Show me the table. Day 1 is a dry run only: uv run python -m outbound.push_smartlead ... --custom page_topic --dry-run, then
-send_contacts_to_heyreach with dry_run true. Send nothing until I approve.
+Suppress against data/crm_export.csv. Score each company against the ICP, drop the rest with a one-line reason, save out/visitors_icp.csv.
+For ICP companies without a named person, run lookup_decision_makers with the CLAUDE.md titles and append those buyers to
+out/visitors_icp.csv as email_status verified. Split verified from not-verified with outbound.filter (--keep-regex 'email_status=^verified$'
+and 'email_status=^(?!verified)'), run outbound.waterfall on the not-verified rows, and merge both into out/visitors_final.csv.
+Derive page_topic from the page URL, and never mention that we saw the visit. Show me the table.
+Day 1 is a dry run only: uv run python -m outbound.push_smartlead out/visitors_final.csv --campaign-id ID --custom first_line,page_topic --dry-run,
+then send_contacts_to_heyreach with dry_run true. After I approve, push to Smartlead (verified only) and send ICP rows
+with a linkedin_url to HeyReach. Each lead gets email from one tool only. Send nothing until I approve.
 ```
 
 ## Guardrails

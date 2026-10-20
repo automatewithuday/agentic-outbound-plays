@@ -1,0 +1,20 @@
+# EDIT ME — tune with your own reply and meeting data
+weights:
+  first_party: 40
+  second_party: 25
+  third_party: 10
+freshness_days:
+  job_change: [14, 45]
+  funding: [14, 28]
+  hiring: [7, 14]
+  news: [0, 30]
+  social_intent: [0, 14]
+  website_visit: [0, 7]
+  engagement: [0, 30]
+bands:
+  work_today: 80
+  sequence_this_week: 40
+listeningkit:
+  min_score: 70
+  platforms: [reddit, x, facebook]
+max_score: 100

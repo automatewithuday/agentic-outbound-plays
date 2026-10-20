@@ -40,7 +40,31 @@ Catch-all and unknown never go to Smartlead. Wait for my approval before pushing
 
 ## Play 2 · Signal scoring (warm)
 
-_coming in Task 5_
+**Temperature:** warm. Something just changed at the company.
+
+**Job:** rank your TAM by fresh buying signals so you work the hot accounts this week and nurture the rest. Closer signals and more signals mean higher intent.
+
+**Steps**
+1. Start from `data/tam.csv` (`company_domain,company_name`); build it with GetLeads `search_companies` if you have none. Signals only rank a list.
+2. Collect third-party signals into `out/signals.csv` (`company_domain,signal_type,party,event_date,source_url,detail`): funding with `list_funding_signals` (since 28 days ago, 1 credit per record, read each source link), hiring with Apify `harvestapi~linkedin-job-search` via `common.apify`, job changes with `count_contacts` then `search_contacts` (only accounts already at 40+), optional news with Deepline `predictleads_company_news_events` (0.56 credits per call).
+3. Optional social intent: Log by ListeningKit MCP (`claude mcp add listeningkit -- https://log.listeningkit.com/mcp --header "Authorization: Bearer <key>"`, or self-host from https://github.com/matthewdonsemail-lab/log). `list_matches(min_score, platform)` for your pain keywords. Reddit, X and Facebook only; no LinkedIn. Confirm each company with `lookup_company`.
+4. Add first-party rows (`data/crm_export.csv` closed-lost and stalled, `data/transcripts/`, Play 5 visits, Play 3 engagement on your posts) and second-party rows (partner-post engagement, Play 4 champions).
+5. Score: `uv run python -m outbound.score_signals data/tam.csv --signals out/signals.csv --out out/accounts_scored.csv`. Weights are 40 first-party, 25 second-party, 10 third-party, capped at 100, from `config/signal_scoring.yaml` (edit it with your own reply and meeting data). Bands: `work_today` 80+, `sequence_this_week` 40 to 79, `nurture` below 40. Events outside their freshness window (for example funding 14 to 28 days, hiring 7 to 14, job change 14 to 45) are dropped.
+6. For `work_today` accounts, `lookup_decision_makers(domain, limit 5)` and keep 2 buyers per account by your `CLAUDE.md` titles; run `outbound.waterfall` only on rows with no valid email. Show the table; nothing sends.
+
+**Prompt to paste**
+```
+Run the Play 2 skill. Use data/tam.csv (build it with search_companies if missing). Collect funding (list_funding_signals, last 28 days,
+verify each source link), hiring (Apify harvestapi~linkedin-job-search), job changes (count_contacts then search_contacts for 40+ accounts),
+optional news and ListeningKit social intent into out/signals.csv. Add first-party rows from data/crm_export.csv and data/transcripts/
+and second-party rows from partner posts and Play 4 champions. Keep only signals inside the windows in config/signal_scoring.yaml, drop
+duplicates, then run uv run python -m outbound.score_signals data/tam.csv --signals out/signals.csv --out out/accounts_scored.csv.
+For work_today accounts find 2 buyers each by CLAUDE.md titles. State the cost before every paid step. Show me the table. Send nothing until I approve.
+```
+
+**Why it works:** Gong Labs (2023) found emails that reference buyer-journey actions get about 3x the replies and meetings. A scored list tells you which account has a real, recent reason to talk, and the first line can name it.
+
+**What you get:** `out/accounts_scored.csv` with `company_domain,company_name,score,band,signal_count,signals` for every TAM row, band counts printed in the terminal, and two verified buyers per `work_today` account.
 
 ## Play 3 · LinkedIn post engagers (warm)
 

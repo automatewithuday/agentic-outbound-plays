@@ -18,6 +18,26 @@ def _kv(spec, flag):
     return k, v
 
 
+def _range(rng):
+    lo, sep, hi = rng.partition("..")
+    try:
+        lo, hi = int(lo), int(hi)
+    except ValueError:
+        sep = ""
+    if not sep:
+        raise SystemExit(f"filter: --days expects col=MIN..MAX with integers, got {rng!r}")
+    if lo > hi:
+        raise SystemExit(f"filter: --days MIN > MAX ({lo}..{hi})")
+    return lo, hi
+
+
+def _pair(spec):
+    a, _, b = spec.partition(",")
+    if not a or not b or "," in b:
+        raise SystemExit(f"filter: --neq expects colA,colB, got {spec!r}")
+    return [a, b]
+
+
 def apply_filters(rows, keep_regex=(), days=(), neq=(), crm_rows=None, dedupe_on=None, today=None):
     """Return (kept, dropped, counts). Rules run in this order; a row is dropped by the first rule it fails.
     Column names are exact header matches, so dotted names like job_change.date work on flattened CSVs."""
@@ -36,8 +56,7 @@ def apply_filters(rows, keep_regex=(), days=(), neq=(), crm_rows=None, dedupe_on
         drop(f"keep_regex:{col}", lambda r, col=col, rx=re.compile(rx): bool(rx.search((r.get(col) or "").strip())))
     for spec in days:
         col, rng = _kv(spec, "--days")
-        lo, _, hi = rng.partition("..")
-        lo, hi = int(lo), int(hi)
+        lo, hi = _range(rng)
 
         def ok(r, col=col, lo=lo, hi=hi):
             try:
@@ -48,7 +67,7 @@ def apply_filters(rows, keep_regex=(), days=(), neq=(), crm_rows=None, dedupe_on
 
         drop(f"days:{col}", ok)
     for spec in neq:
-        a, b = spec.split(",")
+        a, b = _pair(spec)
         drop(f"neq:{a},{b}", lambda r, a=a, b=b: not (_norm(r.get(a)) and _norm(r.get(a)) == _norm(r.get(b))))
     if crm_rows is not None:
         k, d = c.suppress(kept, crm_rows, today=today)
@@ -76,6 +95,18 @@ def main(argv=None):
     if not a.input or not a.out:
         ap.error("input CSV and --out are required")
     rows = c.read_csv(a.input)
+    header = list(dict.fromkeys(k for r in rows for k in r))
+    for spec in a.keep_regex + a.days:
+        _kv(spec, "--keep-regex/--days")
+    for spec in a.days:
+        _range(spec.partition("=")[2])
+    named = [_kv(s, "--keep-regex")[0] for s in a.keep_regex] + [_kv(s, "--days")[0] for s in a.days]
+    for s in a.neq:
+        named += _pair(s)
+    named += a.dedupe_on.split(",") if a.dedupe_on else []
+    for col in named:
+        if rows and col not in header:
+            raise SystemExit(f"filter: column '{col}' not in header: {header}")
     kept, dropped, counts = apply_filters(
         rows, a.keep_regex, a.days, a.neq, c.read_csv(a.suppress) if a.suppress else None,
         a.dedupe_on.split(",") if a.dedupe_on else None, date.fromisoformat(a.today) if a.today else None)
@@ -127,6 +158,19 @@ def selftest():
     assert [r["email"] for r in c.read_csv(td / "o.csv")] == ["1@x.com"] and "kept 1 / dropped 1 of 2" in buf.getvalue()
     dr = c.read_csv(td / "o.csv.dropped.csv")
     assert len(dr) == 1 and dr[0]["drop_reason"] == "keep_regex:job_change.status" and dr[0]["email"] == "2@x.com"
+    # fail loudly: missing column (neq would fail open), bad specs
+    def bad(*args):
+        try:
+            main([str(td / "in.csv"), "--out", str(td / "o2.csv"), *args])
+        except SystemExit as e:
+            return str(e)
+        raise AssertionError(f"no failure for {args}")
+    assert "column 'new_compny' not in header" in bad("--neq", "job_change.new_company,new_compny")
+    assert "column 'job_change.stat' not in header" in bad("--keep-regex", "job_change.stat=^moved$")
+    assert "column 'nope' not in header" in bad("--days", "nope=1..2") and "column 'zz' not in header" in bad("--dedupe-on", "zz")
+    assert "MIN..MAX" in bad("--days", "job_change.date=14") and "MIN..MAX" in bad("--days", "job_change.date=a..b")
+    assert "MIN > MAX" in bad("--days", "job_change.date=45..14") and "colA,colB" in bad("--neq", "email")
+    assert not (td / "o2.csv").exists()
     print("OK")
     return 0
 

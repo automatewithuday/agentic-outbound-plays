@@ -180,8 +180,8 @@ def write_csv(path, rows, fieldnames=None):
 # ---- email status ----
 STATUS = ("verified", "catch_all", "unknown", "not_found")
 VERIFIER_MAP = {
-    "valid": "verified", "catch_all": "catch_all", "valid_catch_all": "catch_all", "unknown": "unknown",
-    **{k: "discard" for k in ("invalid", "disposable", "spamtrap", "abuse", "do_not_mail")},
+    "valid": "verified", "ok": "verified", "deliverable": "verified", "catch_all": "catch_all", "valid_catch_all": "catch_all", "unknown": "unknown", "risky": "catch_all",
+    **{k: "discard" for k in ("invalid", "undeliverable", "disposable", "spamtrap", "abuse", "do_not_mail")},
 }
 
 
@@ -319,7 +319,7 @@ def selftest():
     # normalize_status
     for raw, want in [("valid", "verified"), ("catch_all", "catch_all"), ("valid_catch_all", "catch_all"), ("unknown", "unknown"),
                       ("invalid", "discard"), ("disposable", "discard"), ("spamtrap", "discard"), ("abuse", "discard"),
-                      ("do_not_mail", "discard"), ("VALID", "verified"), ("weird", "unknown"), (None, "unknown")]:
+                      ("do_not_mail", "discard"), ("VALID", "verified"), ("ok", "verified"), ("deliverable", "verified"), ("risky", "catch_all"), ("undeliverable", "discard"), ("weird", "unknown"), (None, "unknown")]:
         assert normalize_status(raw) == want, raw
 
     # dedupe

@@ -11,13 +11,10 @@ BOUNCEBAN_USD = 0.02
 FULLENRICH_USD = 0.10
 PER_ROW_CAP_USD = 0.15     # default total cap = rows x this, when --cap-usd is not given
 OUT_COLS = ["email", "email_status", "email_provider", "verifier", "mx_class", "miss_reason"]
-# vendor verdicts the shared map lacks: millionverifier says "ok"; bounceban says deliverable/undeliverable
-_EXTRA = {"ok": "valid", "deliverable": "valid", "undeliverable": "invalid", "risky": "catch_all"}
 
 
 def _norm(raw):
-    r = str(raw or "").strip().lower()
-    return c.normalize_status(_EXTRA.get(r, r))
+    return c.normalize_status(raw)  # the ONLY producer of "verified": a vendor verdict field run through the shared map
 
 
 def _first(d, *keys):
@@ -40,25 +37,56 @@ def _items(out, *keys):
     return []
 
 
+def _keys(d):
+    """Match keys of a result/row: normalized linkedin url (if echoed) and (first, last, domain)."""
+    ks = []
+    li = c._li(d.get("linkedin_url") or d.get("linkedinUrl"))
+    if li:
+        ks.append(("li", li))
+    n = tuple((d.get(k) or "").strip().lower() for k in ("first_name", "last_name"))
+    dom = (d.get("company_domain") or d.get("domain") or "").strip().lower()
+    if all(n) and dom:
+        ks.append(("name", *n, dom))
+    return ks
+
+
+def _match(name, rows, out, res, to_cand):
+    """Aligned candidate list, matched by echoed key (never by position). Unmatched rows stay {} (pending)."""
+    if out is None:  # dry-run: wrapper recorded the planned call
+        return [{} for _ in rows]
+    if rows and not res:
+        raise RuntimeError(f"{name}: empty or unrecognized result for {len(rows)} rows after the call was made: {str(out)[:200]}")
+    if len(res) != len(rows):
+        print(f"WARN {name}: {len(res)} results for {len(rows)} rows; unmatched rows stay pending", file=sys.stderr)
+    by = {}
+    for d in res:
+        for k in _keys(d) if isinstance(d, dict) else []:
+            by.setdefault(k, d)
+    cands = []
+    for r in rows:
+        d = next((by[k] for k in _keys(r) if k in by), None)
+        cands.append(to_cand(d) if d else {})
+    return cands
+
+
+def _gl_cand(item):
+    d = (item.get("data") or {}) if item.get("success") else {}
+    em = _first(d, "email", "work_email", "professional_email")
+    if not em and isinstance(d.get("emails"), list) and d["emails"]:
+        e0 = d["emails"][0]
+        em = e0.get("email") if isinstance(e0, dict) else e0
+    if not em:
+        return {}
+    c.spend(GETLEADS_CREDIT_USD, "getleads:credit")  # 1 credit per success only
+    return {"email": em, "provider": "getleads", "raw_status": _first(d, "email_status")}
+
+
 def find_getleads(rows):
     """One candidate dict (or {}) per row, aligned. Candidate: email, provider, raw_status, miss_reason."""
     out = c.getleads("POST", "/api/v1/enrich/from-linkedin",
                      json={"items": [{"linkedin_url": r["linkedin_url"]} for r in rows], "limit_per_item": 1},
                      usd=0.0, label="getleads:enrich")
-    res = _items(out, "results")
-    cands = []
-    for i in range(len(rows)):
-        d = (res[i].get("data") or {}) if i < len(res) and res[i].get("success") else {}  # ponytail: aligned by position, GetLeads echoes order
-        em = _first(d, "email", "work_email", "professional_email")
-        if not em and isinstance(d.get("emails"), list) and d["emails"]:
-            e0 = d["emails"][0]
-            em = e0.get("email") if isinstance(e0, dict) else e0
-        if em:
-            c.spend(GETLEADS_CREDIT_USD, "getleads:credit")  # 1 credit per success only
-            cands.append({"email": em, "provider": "getleads", "raw_status": _first(d, "email_status", "status")})
-        else:
-            cands.append({})
-    return cands
+    return _match("getleads", rows, out, _items(out, "results"), _gl_cand)  # results echo linkedinUrl
 
 
 def find_deepline(rows):
@@ -66,7 +94,7 @@ def find_deepline(rows):
         p = Path(td) / "in.csv"
         c.write_csv(p, rows, ["first_name", "last_name", "company_domain", "linkedin_url"])
         out = c.deepline_play("prebuilt/person-to-email-batch", csv_path=p, usd_estimate=DEEPLINE_FIND_USD * len(rows))
-    return _align(rows, _items(out), "deepline")
+    return _match("deepline", rows, out, _items(out), lambda d: _cand(d, "deepline"))
 
 
 def find_fullenrich(rows):
@@ -74,26 +102,24 @@ def find_fullenrich(rows):
     data = [{"first_name": r["first_name"], "last_name": r["last_name"], "domain": r["company_domain"],
              "linkedin_url": r.get("linkedin_url") or None, "enrich_fields": ["contact.emails"]} for r in rows]
     out = c.deepline_action("fullenrich_bulk_enrich", {"name": "play-1", "data": data}, FULLENRICH_USD * len(rows))
-    return _align(rows, _items(out, "datas"), "fullenrich")
+    return _match("fullenrich", rows, out, _items(out, "datas"), lambda d: _cand(d, "fullenrich"))
 
 
-def _align(rows, res, default_provider):
-    cands = []
-    for i in range(len(rows)):
-        d = res[i] if i < len(res) and isinstance(res[i], dict) else {}  # ponytail: positional; swap to key match if the play reorders
-        em = _first(d, "email", "most_probable_work_email")
-        if isinstance(em, dict):
-            em = em.get("email")
-        cands.append({"email": em, "provider": d.get("email_source") or default_provider,
-                      "raw_status": _first(d, "email_validated", "email_status"), "miss_reason": d.get("miss_reason"),
-                      "mx_class": d.get("email_route")} if em else {"miss_reason": d.get("miss_reason")})
-    return cands
+def _cand(d, default_provider):
+    em = _first(d, "email", "most_probable_work_email")
+    if isinstance(em, dict):
+        em = em.get("email")
+    if not em:
+        return {"miss_reason": d.get("miss_reason")}
+    return {"email": em, "provider": d.get("email_source") or default_provider,
+            "raw_status": _first(d, "email_validated", "email_status"), "miss_reason": d.get("miss_reason"),
+            "mx_class": d.get("email_route")}
 
 
 def verify(email):
     """MillionVerifier; catch_all -> BounceBan once. Returns (status, verifier)."""
     mv = c.deepline_action("millionverifier_verify_email", {"email": email}, VERIFY_USD) or {}
-    st = _norm(_first(mv, "email_status", "status", "result"))
+    st = _norm(_first(mv, "email_status", "status"))
     if st != "catch_all":
         return st, "millionverifier"
     bb = c.deepline_action("bounceban_verify_single", {"email": email}, BOUNCEBAN_USD) or {}
@@ -189,9 +215,10 @@ def main(argv=None):
         res, aborted = run(b, finders)
         out += res
     cols = list(dict.fromkeys([k for r in ded for k in r] + OUT_COLS))
-    c.write_csv(a.out, out, cols)
+    dest = str(a.out) + (".dryrun" if a.dry_run else "")  # a dry run must never overwrite real output
+    c.write_csv(dest + (".csv" if a.dry_run else ""), out, cols)
     text, _ = summarize(len(rows), len(ded), out, aborted)
-    Path(str(a.out) + ".report.md").write_text(text)
+    Path(dest + ".report.md").write_text(text)
     print(text, end="")
     return 0
 
@@ -213,7 +240,7 @@ def selftest():
         verify = lambda e: (calls.append(e), ver[e])[1]
         return run(rows, [("getleads", find_getleads), ("deepline", find_deepline)])
 
-    V, CA, U, D = ("verified", "millionverifier"), ("catch_all", "x"), ("unknown", "millionverifier"), ("discard", "x")
+    V, U, D = ("verified", "millionverifier"), ("unknown", "millionverifier"), ("discard", "x")
     cand = lambda e, p="getleads": {"email": e, "provider": p}
     # valid first provider stops: deepline never asked about f0
     out, ab = go(mk(1), {"f0": cand("a@x.com")}, {"f0": cand("WRONG@x.com")}, {"a@x.com": V})
@@ -234,6 +261,38 @@ def selftest():
     # provider-declared valid skips the verifier
     out, _ = go(mk(1), {"f0": {**cand("v@x.com"), "raw_status": "valid"}}, {}, {})
     assert out[0]["verifier"] == "provider" and calls == []
+    # run()-level catch-all: stops, second provider untouched, BounceBan once
+    find_getleads, find_deepline, verify = real
+    seen2, dl = [], []
+    orig = c.deepline_action
+    c.deepline_action = lambda aid, p, u: seen2.append(aid) or ({"status": "catch_all"} if aid.startswith("million") else {"status": "risky"})
+    try:
+        c._reset()
+        out, _ = run(mk(1), [("getleads", fake({"f0": cand("c@x.com")})), ("deepline", lambda r: dl.append(r) or [cand("WRONG@x.com")])])
+    finally:
+        c.deepline_action = orig
+    assert out[0]["email_status"] == "catch_all" and out[0]["email"] == "c@x.com" and dl == [] and seen2.count("bounceban_verify_single") == 1
+    # dedupe before spend: duplicates never reach a provider
+    dup = mk(2) + [dict(mk(1)[0])]
+    ded0 = c.dedupe(c.dedupe(dup, ["linkedin_url"]), ["first_name", "last_name", "company_domain"])
+    asked = []
+    find_getleads = lambda r: asked.extend(x["first_name"] for x in r) or [{}] * len(r)
+    run(ded0, [("getleads", find_getleads)])
+    assert asked == ["f0", "f1"]
+    # matching: reordered results, unmatched rows pending, empty -> raises, generic "status" never short-circuits
+    rws = mk(2)
+    res = [{"linkedinUrl": "LI1/", "success": True, "data": {"email": "b@x.com", "status": "valid"}}]
+    with contextlib.redirect_stderr(io.StringIO()):
+        cs = _match("t", rws, {"r": 1}, res, _gl_cand)
+    assert cs[0] == {} and cs[1]["email"] == "b@x.com" and cs[1]["raw_status"] is None
+    with contextlib.redirect_stderr(io.StringIO()):
+        cs = _match("t", rws, {"r": 1}, [{"first_name": "F1", "last_name": "L", "company_domain": "D1.com", "email": "n@x.com"}], lambda d: _cand(d, "dl"))
+    assert cs[0] == {} and cs[1]["email"] == "n@x.com"
+    try:
+        _match("deepline", rws, {"weird": 1}, [], _cand); raise AssertionError("empty result must raise")
+    except RuntimeError as e:
+        assert "deepline" in str(e) and "weird" in str(e)
+    assert _match("t", rws, None, [], _cand) == [{}, {}]  # dry-run
     # real verify(): catch-all calls BounceBan exactly once; plain valid never does
     find_getleads, find_deepline, verify = real
     seen = []
@@ -274,7 +333,8 @@ def selftest():
     c._reset()
     with contextlib.redirect_stdout(io.StringIO()):
         assert main([str(td / "in.csv"), "--out", str(td / "o.csv"), "--dry-run"]) == 0
-    assert c.SPENT["usd"] == 0.0 and len(c.read_csv(td / "o.csv")) == 3 and (td / "o.csv.report.md").exists()
+    assert c.SPENT["usd"] == 0.0 and len(c.read_csv(td / "o.csv.dryrun.csv")) == 3 and (td / "o.csv.dryrun.report.md").exists()
+    assert not (td / "o.csv").exists() and not (td / "o.csv.report.md").exists()  # real artifacts untouched
     c._reset()
     print("OK")
     return 0

@@ -90,7 +90,7 @@ Every Play has a skill in `.claude/skills/` with the exact steps, and the [Playb
 - **No one gets contacted twice.** A shared registry remembers every push. To deliberately re-send to someone, you delete their row.
 - **One email tool per person.** LinkedIn plus email for the same person is fine; two email tools is not.
 - **Your CRM wins.** Open deals, active sequences, customers and anyone touched in the last 14 days are removed before every push, from a simple CSV export.
-- **Spend is capped.** Every paid call is estimated first and refused if it would blow the cap you set. Deepline and Apify enforce their caps on their side; the rest are estimates, and the README of each Play says which is which.
+- **Spend is capped.** Every paid call is estimated first and refused if it would blow the cap you set. Deepline and Apify enforce their caps on their side; the rest are estimates, and the [Playbook](docs/PLAYBOOK.md) guardrails say which is which.
 - **Some of this carries platform risk.** Scraping LinkedIn engagers and identifying website visitors have terms-of-service and privacy implications. Keep volumes low, prefer your own and partner posts, and update your privacy policy before the pixel goes live.
 
 ## A few words you will meet

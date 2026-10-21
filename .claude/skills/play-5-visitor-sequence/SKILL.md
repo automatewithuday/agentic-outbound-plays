@@ -63,7 +63,7 @@ out/visitors_icp.csv as email_status verified. Split verified from not-verified 
 and 'email_status=^(?!verified)'), run outbound.waterfall on the not-verified rows, and merge both into out/visitors_final.csv.
 Derive page_topic from the page URL, and never mention that we saw the visit. Show me the table.
 Day 1 is a dry run only: uv run python -m outbound.push_smartlead out/visitors_final.csv --campaign-id ID --custom first_line,page_topic --dry-run,
-then send_contacts_to_heyreach with dry_run true. After I approve, push to Smartlead (verified only) and send ICP rows
+then HeyReach: send_contacts_to_heyreach with dry_run true, or outbound.push_heyreach --list-id ID --dry-run. After I approve, push to Smartlead (verified only) and send ICP rows
 with a linkedin_url to HeyReach. Each lead gets email from one tool only. Send nothing until I approve.
 ```
 

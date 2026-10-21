@@ -14,7 +14,7 @@ Based on Michel Lieben's article "Here's how to Generate Leads With 5 Agentic Ou
 
 ## First-run checklist
 
-- [ ] HeyReach connected through the GetLeads MCP tool `configure_heyreach`.
+- [ ] HeyReach: either connected through the GetLeads MCP tool `configure_heyreach` (free push via `send_contacts_to_heyreach`), or a HeyReach API key in `.env` as `HEYREACH_API_KEY` for the direct push `outbound/push_heyreach.py` (lists by default; a campaign push into an IN_PROGRESS campaign starts messaging).
 - [ ] A Smartlead campaign created in the Smartlead UI and kept in DRAFT/paused until the copy is written and you have approved it; its id copied for `--campaign-id`.
 - [ ] `data/crm_export.csv` exists (no CRM yet? copy the header row of `data/crm_export.example.csv`). Accepted values: `stage` `open|proposal|negotiation`, `in_sequence`/`is_customer` `true|1|yes`, `last_touched` `YYYY-MM-DD`.
 - [ ] `cp .env.example .env` and filled in.
@@ -89,7 +89,7 @@ For work_today accounts find 2 buyers each by CLAUDE.md titles. State the cost b
 6. Suppress against `data/crm_export.csv`. A T1 person a rep already owns becomes an alert line, not outreach.
 7. Find emails for tiers 1 to 3 with `uv run python -m outbound.waterfall`.
 8. Write one first line each from the post topic plus one recent company event (Play 2 signals if you have them). One sentence, no flattery.
-9. Show the table and drafts. After approval: T1 to HeyReach via `send_contacts_to_heyreach` (`dry_run` first) and Smartlead with `push_smartlead --custom first_line`; T2 and T3 to Smartlead only. One email tool per lead.
+9. Show the table and drafts. After approval: T1 to HeyReach via GetLeads `send_contacts_to_heyreach` (`dry_run` first) or `uv run python -m outbound.push_heyreach out/engagers_final.csv --list-id ID --dry-run` (direct API, `HEYREACH_API_KEY` in `.env`) and Smartlead with `push_smartlead --custom first_line`; T2 and T3 to Smartlead only. One email tool per lead.
 
 **Prompt to paste**
 ```

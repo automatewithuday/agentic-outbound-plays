@@ -1,5 +1,5 @@
 """Shared helpers for all Plays: env, disk cache, spend ledger, HTTP/CLI wrappers, CSV, dedupe, suppression."""
-import argparse, csv, hashlib, json, math, os, subprocess, sys, time
+import argparse, csv, hashlib, json, math, os, re, subprocess, sys, tempfile, time
 from collections import defaultdict
 from datetime import date
 from pathlib import Path
@@ -141,7 +141,13 @@ def listeningkit(path, params=None):
 def _deepline(argv):
     p = subprocess.run(argv, capture_output=True, text=True)
     if p.returncode:
-        raise RuntimeError(f"{' '.join(argv[:4])} failed ({p.returncode}): {p.stderr.strip()[-500:]}")
+        cause = p.stderr.strip()[-300:]
+        m = re.search(r"play/[\w./-]+/run/[\w-]+", p.stderr + p.stdout)
+        if m:  # the CLI's stderr hides the cause; `runs get` has it (billing cap, provider error, ...)
+            g = subprocess.run(["deepline", "runs", "get", m.group(0)], capture_output=True, text=True)
+            err = next((ln.strip() for ln in g.stdout.splitlines() if ln.strip().startswith("error:")), "")
+            cause = f"{err or cause}  (details: deepline runs get {m.group(0)})"
+        raise RuntimeError(f"{' '.join(argv[:4])} failed ({p.returncode}): {cause}")
     return json.loads(p.stdout)
 
 
@@ -160,7 +166,18 @@ def deepline_play(play_id, *, csv_path=None, input=None, usd_estimate=0.0):
     ident = dict(payload)
     if csv_path:
         ident["csv"] = hashlib.sha256(Path(csv_path).read_bytes()).hexdigest()
-    return _call(_json_key("play", play_id, ident), usd_estimate, f"deepline:{play_id}", lambda: _deepline(argv))
+
+    def run_and_export():
+        env_ = _deepline(argv)  # `plays run --json` returns a run envelope (run.id, rowOutcomes, datasets), not the rows
+        run_id = (env_.get("run") or {}).get("id") if isinstance(env_, dict) else None
+        if not run_id or not env_.get("datasets"):
+            return env_
+        with tempfile.TemporaryDirectory() as td:  # rows live in a dataset: `runs export` is free and returns every row
+            out = Path(td) / "rows.json"
+            _deepline(["deepline", "runs", "export", run_id, "--format", "json", "--out", str(out), "--json"])
+            return {"run_id": run_id, "rows": json.loads(out.read_text())}
+
+    return _call(_json_key("play-rows", play_id, ident), usd_estimate, f"deepline:{play_id}", run_and_export)
 
 
 def deepline_action(action_id, params, usd_estimate, max_age_days=None):

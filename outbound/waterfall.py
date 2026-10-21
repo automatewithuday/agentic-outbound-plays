@@ -5,7 +5,7 @@ from pathlib import Path
 from outbound import common as c
 
 GETLEADS_CREDIT_USD = 0.0  # set to your plan's per-credit price (charged per hit only)
-DEEPLINE_FIND_USD = 0.05   # per-row estimates for the ledger/dry-run; tune to your Deepline bill
+DEEPLINE_FIND_USD = 0.15   # per-row estimate AND the hard --max-credits basis (1.5 credits/row). Deepline reports avg 1.07, max 5.06 credits/row for this play; a single provider call was observed at 1.56. Too low = the play halts on RUN_BILLING_CAP_EXCEEDED.
 VERIFY_USD = 0.003
 BOUNCEBAN_USD = 0.02
 FULLENRICH_USD = 0.10
@@ -150,7 +150,17 @@ def run(rows, finders):
             idx = [i for i in pending if name != "getleads" or rows[i].get("linkedin_url")]
             if not sub:
                 continue
-            for i, cand in zip(idx, fn(sub)):
+            try:
+                found = list(fn(sub))
+            except c.SpendCapExceeded:
+                raise  # our own ledger cap: handled below, aborts the whole run
+            except RuntimeError as e:  # provider failed (billing cap, bad shape, outage): keep the rows, record why, try the next provider
+                msg = f"provider_error:{name}: {str(e)[:160]}"
+                for i in idx:
+                    res[i]["miss_reason"] = msg
+                print(f"ERROR {name}: {e}", file=sys.stderr)
+                continue
+            for i, cand in zip(idx, found):
                 if not cand or not cand.get("email"):
                     if cand and cand.get("miss_reason"):
                         res[i]["miss_reason"] = str(cand["miss_reason"])
@@ -223,9 +233,12 @@ def main(argv=None):
     dest = str(a.out) + (".dryrun" if a.dry_run else "")  # a dry run must never overwrite real output
     c.write_csv(dest + (".csv" if a.dry_run else ""), out, cols)
     text, _ = summarize(len(rows), len(ded), out, aborted)
+    errs = sum(1 for r in out if str(r.get("miss_reason", "")).startswith("provider_error:"))
+    if errs:
+        text += f"- PROVIDER ERRORS: {errs} rows hit a provider failure (see miss_reason); output written, exit 1\n"
     Path(dest + ".report.md").write_text(text)
     print(text, end="")
-    return 0
+    return 1 if errs else 0
 
 
 def selftest():
@@ -266,6 +279,14 @@ def selftest():
     # provider-declared valid skips the verifier
     out, _ = go(mk(1), {"f0": {**cand("v@x.com"), "raw_status": "valid"}}, {}, {})
     assert out[0]["verifier"] == "provider" and calls == []
+    # a provider that raises (billing cap, bad shape) keeps the rows, records why, and the next provider still runs
+    c._reset(); calls.clear()
+    def boom(rows): raise RuntimeError("RUN_BILLING_CAP_EXCEEDED")
+    find_getleads, find_deepline, verify = boom, fake({"f0": cand("ok@x.com", "deepline")}), (lambda e: V)
+    with contextlib.redirect_stderr(io.StringIO()):
+        out, ab = run(mk(2), [("getleads", find_getleads), ("deepline", find_deepline)])
+    assert not ab and out[0]["email"] == "ok@x.com" and out[1]["email_status"] == "not_found"
+    assert out[1]["miss_reason"].startswith("provider_error:getleads: RUN_BILLING_CAP")
     # run()-level catch-all: stops, second provider untouched, BounceBan once
     find_getleads, find_deepline, verify = real
     seen2, dl = [], []

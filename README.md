@@ -109,9 +109,9 @@ and Smartlead, T2 and T3 to Smartlead only, one email tool per lead. Send nothin
 
 **Guardrail:** LinkedIn's User Agreement prohibits scraping and automated activity, and accounts that use such tools risk restriction. Keep volume low and prefer your own and partner posts.
 
-## Play 4 · Champion reactivation (warm)
+## Play 4 · Champion reactivation (hot)
 
-**Temperature:** warm. They already know and like you.
+**Temperature:** hot. They already know and like you.
 
 **Job:** reach past champions who just started a new job, while the move is fresh (14 to 45 days).
 
@@ -173,7 +173,7 @@ linkedin_url, and each lead gets email from one tool only. Send nothing until I 
 
 1. Setup: keys, MCP and `CLAUDE.md` first; every Play depends on them.
 2. Play 1: cheapest, and it proves the cost and suppression plumbing on a plain list.
-3. Play 4: your own past champions are the warmest list with the least data work.
+3. Play 4: your own past champions are the hottest list with the least data work.
 4. Play 5: hot intent; small volume, highest reply rate.
 5. Play 2: scoring needs weights tuned against your results from Plays 1, 4 and 5.
 6. Play 3: post scraping is the most variable cost; do it last with a tight cap.

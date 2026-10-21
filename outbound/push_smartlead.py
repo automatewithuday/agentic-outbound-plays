@@ -17,7 +17,6 @@ from outbound import common as c
 URL = "https://server.smartlead.ai/api/v1/campaigns/{id}/leads"  # from the brief; not verified against api.smartlead.ai/reference
 REGISTRY = c.ROOT / "out" / "pushed_registry.csv"
 REG_COLS = ["email", "pushed_to", "campaign_id", "pushed_at", "source_file"]
-_NOT_ACCEPTED = ("skip", "duplic", "block", "invalid", "fail", "unsub", "already", "error")  # count fields that are not "accepted"
 BATCH = 100  # Smartlead's max leads per request
 SETTINGS = {"ignore_global_block_list": False, "ignore_unsubscribe_list": False, "ignore_duplicate_leads_in_other_campaign": False}
 
@@ -29,13 +28,12 @@ def post(url, payload, params=None):
 
 
 def _ints(body, key=""):
-    """Yield (name, int) for every integer field in a JSON body whose name looks like an accepted/total count."""
+    """Yield (name, int) for upload_count / total_leads anywhere in a JSON body; every other field is ignored."""
     if isinstance(body, dict):
         for k, v in body.items():
             yield from _ints(v, str(k).lower())
-    elif isinstance(body, int) and not isinstance(body, bool):
-        if any(w in key for w in ("count", "total", "upload", "lead")) and not any(w in key for w in _NOT_ACCEPTED):
-            yield key, body
+    elif isinstance(body, int) and not isinstance(body, bool) and key in ("upload_count", "total_leads"):
+        yield key, body
 
 
 def _lead(r, custom):
@@ -81,7 +79,10 @@ def push(rows, campaign_id, custom=(), allowed=("verified",), dry_run=False, api
                 raise RuntimeError(f"smartlead: {type(e).__name__} for campaign {campaign_id}; {len(pushed)} rows pushed this run") from None
             if i == 0:
                 print(f"smartlead response (batch 1): {json.dumps(body)[:300]}")
-            short = [(k, v) for k, v in _ints(body) if v < len(chunk)]
+            counts = list(_ints(body))
+            if not counts:
+                print("no upload_count in response; cannot verify accepted count")
+            short = [(k, v) for k, v in counts if v < len(chunk)]
             if short:
                 print(f"WARN accepted {short[0][1]} < sent {len(chunk)} ({short[0][0]})")
                 raise RuntimeError(f"smartlead: batch {i + 1} (campaign {campaign_id}) accepted {short[0][1]} < sent {len(chunk)}; "
@@ -141,7 +142,22 @@ def selftest():
         assert calls[0][1]["lead_list"][3]["custom_fields"] == {"page_topic": "t3"} and calls[0][1]["settings"] == SETTINGS
         assert calls[0][1]["lead_list"][0]["company_name"] == "X"
         assert sorted(w for _, w in refused) == ["already_in_otheremailtool", "already_pushed:smartlead", "no_email", "status_catch_all", "status_unknown"]
-        assert len(pushed) == 251 and "h@x.com" in [r["email"] for r in pushed]  # heyreach never blocks email and pushed[0]["pushed_to"] == "smartlead" and pushed[0]["campaign_id"] == "42" and pushed[0]["pushed_at"]
+        assert len(pushed) == 251 and "h@x.com" in [r["email"] for r in pushed]  # heyreach never blocks email
+        assert pushed[0]["pushed_to"] == "smartlead" and pushed[0]["campaign_id"] == "42" and pushed[0]["pushed_at"]
+        # accepted-count check: only upload_count / total_leads count; other fields never stop a push
+        real_post = post
+        for body, ok, note in (({"ok": True, "upload_count": 99}, False, False),
+                               ({"ok": True, "upload_count": 100, "bounce_count": 0, "skipped_count": 0}, True, False),
+                               ({"ok": True}, True, True)):
+            post = lambda url, payload, params=None, body=body: body; c._reset(); buf = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(buf):
+                    push(rows[:100], "42", api_key="K", registry=None)
+                assert ok, body
+            except RuntimeError:
+                assert not ok, body
+            assert ("no upload_count in response; cannot verify accepted count" in buf.getvalue()) == note, body
+        post = real_post; calls.clear(); c._reset()
         # --allow-status lets unknown through, still not catch_all
         calls.clear(); c._reset()
         pushed, refused = push(rows[250:], "42", allowed=["verified", "unknown"], api_key="K", registry=None)

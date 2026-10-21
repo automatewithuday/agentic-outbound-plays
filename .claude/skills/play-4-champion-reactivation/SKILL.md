@@ -9,7 +9,7 @@ metadata:
   category: signals
 ---
 
-# Play 4 · Champion reactivation (warm)
+# Play 4 · Champion reactivation (hot)
 
 ## How to apply this skill
 

@@ -20,7 +20,7 @@ metadata:
 - A Smartlead campaign id (`--campaign-id`) and a HeyReach campaign configured in GetLeads.
 
 **Compute**
-- Pull the engagers, drop duplicates, then spend money only on rows that survive a free check: the title regex runs on the `headline` column before any paid profile lookup.
+- Pull the engagers, drop duplicates, then spend money only on rows that survive a free check: the title regex runs on the `position` column before any paid profile lookup.
 - Tier each person against the ICP: T1 ICP account + buyer title + commented or engaged on more than one post; T2 ICP account + buyer or influencer title; T3 ICP account, other roles; Out = outside the ICP.
 - Two context layers decide the message: the topic of the post they engaged with, and one recent event at their company.
 - Engagement from the pull is only as fresh as the pull. Run this within a day of any post that performs.
@@ -35,9 +35,9 @@ metadata:
    - `deepline plays run prebuilt/linkedin-post-to-engagers-harvestapi --input '{"post_url": "<url>"}' --max-credits N --run-id-file out/engagers_run_<post-id>.json` (the `--run-id-file` destination must not already exist, so use a fresh name per run).
    - `deepline runs export <run-id> --out out/engagers_<post-id>.csv` with the run id from the run-id file.
    - Fallbacks if Deepline fails: GetLeads `scrape_linkedin_post_once(post_url)` (wallet cash), or Apify `harvestapi~linkedin-post-reactions` and `harvestapi~linkedin-post-comments` through `common.apify` with a `maxTotalChargeUsd` cap. The actor input fields are unverified: check each actor's page before the first run.
-   - Normalise to `name,linkedin_url,headline,engagement,comment_text`, where `engagement` is `comment` or `reaction`. Map whatever column names the export uses to these and say what you mapped. Add a `post_url` column.
+   - Normalise to `name,linkedin_url,position,engagement,comment_text`, where `engagement` is `comment` or `reaction`. Map whatever column names the export uses to these and say what you mapped. Add a `post_url` column.
 3. Merge and dedupe. If you pulled several posts, stack the files and add `posts_engaged` (how many distinct posts each `linkedin_url` touched) before deduping, because T1 depends on it. Then `uv run python -m outbound.filter out/engagers_<post-id>.csv --out out/engagers_dedup.csv --dedupe-on linkedin_url`.
-4. Cheap-first enrich. Split on the free `headline` title test, with the regex rebuilt from the current `CLAUDE.md` buyer titles (a missing column fails loudly): matching rows `uv run python -m outbound.filter out/engagers_dedup.csv --out out/engagers_titled.csv --keep-regex 'headline=(?i)\b(founder|ceo|vp sales|head of growth|head of marketing|head of revops|cro)\b'`, the rest `... --out out/engagers_other.csv --keep-regex 'headline=(?i)^(?!.*\b(founder|ceo|vp sales|head of growth|head of marketing|head of revops|cro)\b)'`. Only the titled rows get `deepline tools execute harvestapi_get_profile --input '{"profileUrl": "<linkedin_url>"}' --json` (about 0.05 credits per profile; check `deepline tools describe harvestapi_get_profile`; the input field name is unverified, so run it on one row first and read the error or output). Resolve each company with GetLeads `lookup_company` and add `company_name,company_domain`. The other rows get no paid lookup: Claude reads the company from the `headline` and keeps them only as T3 candidates when it is clearly an ICP account. Merge both into `out/engagers_enriched.csv`.
+4. Cheap-first enrich. Split on the free `position` title test, with the regex rebuilt from the current `CLAUDE.md` buyer titles (a missing column fails loudly): matching rows `uv run python -m outbound.filter out/engagers_dedup.csv --out out/engagers_titled.csv --keep-regex 'position=(?i)\b(founder|ceo|vp sales|head of growth|head of marketing|head of revops|cro)\b'`, the rest `... --out out/engagers_other.csv --keep-regex 'position=(?i)^(?!.*\b(founder|ceo|vp sales|head of growth|head of marketing|head of revops|cro)\b)'`. Only the titled rows get `deepline tools execute harvestapi_get_profile --input '{"profileUrl": "<linkedin_url>"}' --json` (about 0.05 credits per profile; check `deepline tools describe harvestapi_get_profile`; the input field name is unverified, so run it on one row first and read the error or output). Resolve each company with GetLeads `lookup_company` and add `company_name,company_domain`. The other rows get no paid lookup: Claude reads the company from the `position` and keeps them only as T3 candidates when it is clearly an ICP account. Merge both into `out/engagers_enriched.csv`.
 5. Tier. Claude reads each row against `CLAUDE.md` and writes `tier` (`1`, `2`, `3` or `out`) and `tier_reason` (one line). For more than 30 rows, tier in batches of 10 with a cheap sub-agent (Haiku), then spot-check 5. Save `out/engagers_tiered.csv`; drop `out` rows with `uv run python -m outbound.filter out/engagers_tiered.csv --out out/engagers_icp.csv --keep-regex 'tier=^[123]$'`.
 6. Suppress. `uv run python -m outbound.filter out/engagers_icp.csv --out out/engagers_clean.csv --suppress data/crm_export.csv`. Any T1 row that dropped because a rep already owns it (open opportunity or active sequence in `out/engagers_clean.csv.dropped.csv`) becomes one alert line for the rep ("Name, company, engaged with <post>"), not outreach.
 7. Email. The waterfall needs `first_name,last_name,company_domain,linkedin_url`: split `name`, use `company_domain`. Take tiers 1 to 3 (the file already holds only those): `uv run python -m outbound.waterfall out/engagers_clean.csv --out out/engagers_final.csv --dry-run`, then for real after the user agrees to the plan, passing `--cap-usd` from the Spend caps section of `CLAUDE.md`.
@@ -52,8 +52,8 @@ metadata:
 ```
 Run the Play 3 skill. Post URL: <paste>. Read CLAUDE.md for the ICP and buyer titles. Run deepline plays describe
 prebuilt/linkedin-post-to-engagers-harvestapi, then deepline plays run it with --max-credits and export to
-out/engagers_<post-id>.csv (name, linkedin_url, headline, engagement comment|reaction, comment_text). Dedupe on linkedin_url
-with outbound.filter. Match the buyer titles against headline first and only run harvestapi_get_profile on matching rows;
+out/engagers_<post-id>.csv (first_name, last_name, linkedin_url, position, engagement_type LIKE|comment). Dedupe on linkedin_url
+with outbound.filter. Match the buyer titles against position first and only run harvestapi_get_profile on matching rows;
 get the company with lookup_company. Tier every person: T1 ICP account + buyer title + commented or engaged on more than one post,
 T2 ICP account + buyer or influencer title, T3 ICP account other roles, Out otherwise; write tier and tier_reason (more than 30 rows:
 batches of 10 with a Haiku sub-agent, then spot-check 5). Suppress against data/crm_export.csv; T1 people a rep already owns
@@ -68,7 +68,7 @@ One email tool per lead. State every cost before the paid step. Send nothing unt
 - Nothing sends without approval. Show the table and drafts first; a human reads the post before any T1 message goes.
 - LinkedIn's User Agreement prohibits scraping and automated activity, and accounts that use such tools risk restriction. Use a pull you are comfortable with, keep volume low, and prefer your own and partner posts.
 - Spend is capped: always `--max-credits` on Deepline (a named play has no useful `--dry-run`), `estimate_scrape_cost` before any monitored profile, `maxTotalChargeUsd` on Apify. Wallet cash is real money: check `get_wallet_balance` and report after. Never loop around a cap.
-- Cheap-first: no paid profile lookup before the free `headline` title test.
+- Cheap-first: no paid profile lookup before the free `position` title test.
 - Smartlead gets `verified` rows only. One email tool per lead; `push_smartlead.py` refuses emails already in `out/pushed_registry.csv`.
 - The first line never flatters and never says "I saw you engaged". It references the topic and a company event.
 - Secrets stay in `.env`; never print them. The Smartlead call is unverified against `https://api.smartlead.ai/reference`; check the first dry-run payload.

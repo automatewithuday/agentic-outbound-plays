@@ -82,9 +82,9 @@ For work_today accounts find 2 buyers each by CLAUDE.md titles. State the cost b
 
 **Steps**
 1. Input one post URL. For ongoing monitoring of your own and partner profiles: GetLeads `estimate_scrape_cost`, then `add_monitored_profile(linkedin_profile_url, billing_choice)`, then `list_profile_monitoring_leads` (paid from wallet cash).
-2. Run `deepline plays describe prebuilt/linkedin-post-to-engagers-harvestapi` first, then `deepline plays run prebuilt/linkedin-post-to-engagers-harvestapi --input '{"post_url": "<url>"}' --max-credits N --run-id-file out/engagers_run_<post-id>.json` and `deepline runs export <run-id> --out out/engagers_<post-id>.csv`. Fallbacks: GetLeads `scrape_linkedin_post_once(post_url)` (wallet cash) or Apify `harvestapi~linkedin-post-reactions` / `harvestapi~linkedin-post-comments`. Columns: `name,linkedin_url,headline,engagement (comment|reaction),comment_text`.
+2. Run `deepline plays describe prebuilt/linkedin-post-to-engagers-harvestapi` first, then `deepline plays run prebuilt/linkedin-post-to-engagers-harvestapi --input '{"post_url": "<url>"}' --max-credits N --run-id-file out/engagers_run_<post-id>.json` and `deepline runs export <run-id> --out out/engagers_<post-id>.csv`. Fallbacks: GetLeads `scrape_linkedin_post_once(post_url)` (wallet cash) or Apify `harvestapi~linkedin-post-reactions` / `harvestapi~linkedin-post-comments`. Columns: `first_name,last_name,linkedin_url,position,engagement_type (LIKE|comment)`.
 3. Dedupe: `uv run python -m outbound.filter out/engagers_<post-id>.csv --out out/engagers_dedup.csv --dedupe-on linkedin_url` (count posts per person first if you pulled several).
-4. Cheap-first enrich: test the buyer titles from `CLAUDE.md` against `headline` with `outbound.filter --keep-regex`; only matching rows get Deepline `harvestapi_get_profile` (about 0.05 credits per profile; check `deepline tools describe harvestapi_get_profile`, and run it on one row first) and GetLeads `lookup_company`.
+4. Cheap-first enrich: test the buyer titles from `CLAUDE.md` against `position` with `outbound.filter --keep-regex`; only matching rows get Deepline `harvestapi_get_profile` (about 0.05 credits per profile; check `deepline tools describe harvestapi_get_profile`, and run it on one row first) and GetLeads `lookup_company`.
 5. Tier with Claude (for more than 30 rows, tier in batches of 10 with a cheap sub-agent (Haiku), then spot-check 5): T1 ICP account + buyer title + engaged on more than one post or commented; T2 ICP account + buyer or influencer title; T3 ICP account, other roles; Out = outside the ICP. Writes `tier,tier_reason`.
 6. Suppress against `data/crm_export.csv`. A T1 person a rep already owns becomes an alert line, not outreach.
 7. Find emails for tiers 1 to 3 with `uv run python -m outbound.waterfall`.
@@ -95,7 +95,7 @@ For work_today accounts find 2 buyers each by CLAUDE.md titles. State the cost b
 ```
 Run the Play 3 skill. Post URL: <paste>. Read CLAUDE.md for the ICP and buyer titles. Run deepline plays describe
 prebuilt/linkedin-post-to-engagers-harvestapi, then run it with --max-credits and export to out/engagers_<post-id>.csv.
-Dedupe on linkedin_url with outbound.filter. Match buyer titles against headline first and run harvestapi_get_profile only on
+Dedupe on linkedin_url with outbound.filter. Match buyer titles against position first and run harvestapi_get_profile only on
 matching rows; get the company with lookup_company. Tier everyone (T1 ICP + buyer title + commented or multi-post, T2 ICP + buyer or
 influencer, T3 ICP other roles, Out) with tier and tier_reason. Suppress against data/crm_export.csv; T1 people a rep owns become an
 alert line. Find emails for tiers 1 to 3 with outbound.waterfall. Write one first line each from the post topic plus one recent
@@ -103,7 +103,7 @@ company event, no flattery. Show me the list and drafts. After I approve: T1 to 
 and Smartlead, T2 and T3 to Smartlead only, one email tool per lead. Send nothing until I approve.
 ```
 
-**Why it works:** someone who commented on your topic this week has already shown interest, and the message can name two real things: what they engaged with and what is happening at their company. Cheap-first enrichment means you pay for a profile only when the headline already looks like a buyer.
+**Why it works:** someone who commented on your topic this week has already shown interest, and the message can name two real things: what they engaged with and what is happening at their company. Cheap-first enrichment means you pay for a profile only when the position (LinkedIn headline) already looks like a buyer.
 
 **What you get:** `out/engagers_final.csv` with tiered, ICP-fit, unsuppressed engagers who have a verified email and a `first_line`, an alert line for any T1 a rep owns, and a drafts table to approve.
 

@@ -129,12 +129,26 @@ def _lm_cand(d):
     return {"email": d["email"], "provider": "leadmagic", "raw_status": d.get("status"), "mx_class": mx}
 
 
+def _per_row(name, rows, call):
+    """Call a per-row provider; one row's provider error (bad input, 422) must not abort the provider for the whole batch."""
+    out = []
+    for r in rows:
+        try:
+            out.append(call(r))
+        except c.SpendCapExceeded:
+            raise
+        except RuntimeError as e:
+            print(f"ERROR {name} row {r.get('first_name')} {r.get('last_name')}: {str(e)[:120]}", file=sys.stderr)
+            out.append({"miss_reason": f"{name}:error: {str(e)[:80]}"})
+    return out
+
+
 def find_leadmagic(rows):
     """One call per row (name + domain). Each call is cached by its input, so re-runs are free."""
     # ponytail: sequential subprocess per row (~3 s each); parallelise if 150-row batches feel slow
-    return [_lm_cand(c.deepline_action("leadmagic_email_finder",
-                                       {"first_name": r["first_name"], "last_name": r["last_name"], "domain": r["company_domain"]},
-                                       LEADMAGIC_USD)) for r in rows]
+    return _per_row("leadmagic", rows, lambda r: _lm_cand(c.deepline_action(
+        "leadmagic_email_finder", {"first_name": r["first_name"], "last_name": r["last_name"], "domain": r["company_domain"]}, LEADMAGIC_USD))
+        if r.get("company_domain") else {"miss_reason": "leadmagic:needs_domain"})  # name-only lookups are guesses
 
 
 def _prospeo_cand(d):
@@ -142,17 +156,20 @@ def _prospeo_cand(d):
     em = (((d or {}).get("person") or {}).get("email") or {}) if isinstance(d, dict) else {}
     if not em.get("email"):
         return {"miss_reason": (d or {}).get("error") or "prospeo:not_found"}
-    return {"email": em["email"], "provider": "prospeo", "raw_status": em.get("status"), "mx_class": em.get("email_mx_provider") or ""}
+    return {"email": em["email"], "provider": "prospeo", "raw_status": em.get("status"), "mx_class": em.get("email_mx_provider") or "",
+            "company_domain": ((d.get("company") or {}).get("domain") or (d.get("company") or {}).get("website") or "")}  # fills a blank row domain
 
 
 def find_prospeo(rows):
     """One call per row: LinkedIn URL (highest accuracy) plus name and domain so Prospeo can cross-check the company."""
-    def params(r):
-        p = {"first_name": r["first_name"], "last_name": r["last_name"], "company_domain": r["company_domain"]}
+    def params(r):  # send only what we have: an empty company_domain is rejected by the provider
+        p = {"first_name": r["first_name"], "last_name": r["last_name"]}
+        if (r.get("company_domain") or "").strip():
+            p["company_domain"] = r["company_domain"].strip()
         if r.get("linkedin_url"):
             p["linkedin_url"] = r["linkedin_url"]
         return p
-    return [_prospeo_cand(c.deepline_action("prospeo_enrich_person", params(r), PROSPEO_USD)) for r in rows]
+    return _per_row("prospeo", rows, lambda r: _prospeo_cand(c.deepline_action("prospeo_enrich_person", params(r), PROSPEO_USD)))
 
 
 def _fe_rows(out):
@@ -175,8 +192,8 @@ def _fe_cand(d):
 
 def find_fullenrich(rows):
     """Bulk (<=50) async job; waits, then polls fullenrich_get_result (free) until FINISHED."""
-    data = [{"first_name": r["first_name"], "last_name": r["last_name"], "domain": r["company_domain"],
-             "linkedin_url": r.get("linkedin_url") or None, "enrich_fields": ["contact.emails"]} for r in rows]
+    data = [{k: v for k, v in {"first_name": r["first_name"], "last_name": r["last_name"], "domain": (r.get("company_domain") or "").strip(),
+                               "linkedin_url": r.get("linkedin_url") or "", "enrich_fields": ["contact.emails"]}.items() if v} for r in rows]
     out = c.deepline_action("fullenrich_bulk_enrich", {"name": "play-1", "data": data, "max_wait_ms": 90000}, FULLENRICH_USD * len(rows))
     for _ in range(20):  # ponytail: up to ~2 min of polling; a batch still IN_PROGRESS after that stays a miss and reruns later
         if out is None or (out.get("status") or "").upper() == "FINISHED":
@@ -250,6 +267,8 @@ def run(rows, finders):
                     if cand and cand.get("miss_reason"):
                         res[i]["miss_reason"] = str(cand["miss_reason"])
                     continue
+                if cand.get("company_domain") and not (rows[i].get("company_domain") or "").strip():
+                    rows[i]["company_domain"] = res[i]["company_domain"] = cand["company_domain"]  # learned from the provider (Play 3 engagers)
                 st, ver = _resolve(cand)
                 if st == "discard":
                     res[i]["miss_reason"] = f"{name}:discarded"
@@ -377,7 +396,25 @@ def selftest():
     assert _lm_cand(lm) == {"email": "megan.imbres@onepeloton.com", "provider": "leadmagic", "raw_status": "valid", "mx_class": "Cloud Mailbox Host"}
     assert _lm_cand({"email": None, "message": "no match"})["miss_reason"] == "no match" and not _lm_cand(None).get("email")
     pr = {"person": {"email": {"status": "VERIFIED", "email": "jason.bunge@hasbro.com", "email_mx_provider": "Microsoft"}}}
-    assert _prospeo_cand(pr) == {"email": "jason.bunge@hasbro.com", "provider": "prospeo", "raw_status": "VERIFIED", "mx_class": "Microsoft"}
+    assert _prospeo_cand(pr) == {"email": "jason.bunge@hasbro.com", "provider": "prospeo", "raw_status": "VERIFIED", "mx_class": "Microsoft", "company_domain": ""}
+    assert _prospeo_cand({**pr, "company": {"domain": "hasbro.com"}})["company_domain"] == "hasbro.com"
+    # a row with no company_domain learns it from the provider; LeadMagic is skipped for such rows
+    blank = [{"first_name": "f0", "last_name": "l", "company_domain": "", "linkedin_url": "li0"}]
+    assert find_leadmagic(blank)[0]["miss_reason"] == "leadmagic:needs_domain"
+    # one row's provider error does not abort the provider for the other rows
+    orig = c.deepline_action
+    def flaky(aid, p, u, **k):
+        if p.get("first_name") == "f0": raise RuntimeError("minimum requirements")
+        return {"person": {"email": {"email": "ok@d1.com", "status": "VERIFIED"}}}
+    c.deepline_action = flaky
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            got = find_prospeo(mk(2))
+    finally:
+        c.deepline_action = orig
+    assert got[0]["miss_reason"].startswith("prospeo:error") and got[1]["email"] == "ok@d1.com"
+    out, _ = go(blank, {}, {"f0": {**cand("e@learned.com", "prospeo"), "company_domain": "learned.com"}}, {"e@learned.com": V})
+    assert out[0]["company_domain"] == "learned.com" and out[0]["domain_match"] == "yes"
     assert _resolve(_prospeo_cand(pr)) == ("verified", "provider") and not _prospeo_cand({"person": {"email": None}}).get("email")
     fe = {"status": "FINISHED", "data": [{"input": {"professional_network_url": "https://www.linkedin.com/in/tulaniandre", "first_name": "Tulani",
           "last_name": "André", "company_domain": "nationalgeographic.com"}, "contact_info": {"most_probable_work_email": {"email": "t@zalando.de", "status": "HIGH_PROBABILITY"}}}]}

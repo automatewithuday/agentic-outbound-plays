@@ -148,6 +148,12 @@ def _deepline(argv):
     p = subprocess.run(argv, capture_output=True, text=True)
     if p.returncode:
         cause = p.stderr.strip()[-300:]
+        try:  # `tools execute` prints a JSON envelope with the real cause on stdout; stderr is progress noise
+            err = (json.loads(p.stdout) or {}).get("error")
+            if err:
+                cause = (err.get("message") if isinstance(err, dict) else str(err))[:300]
+        except ValueError:
+            pass
         m = re.search(r"play/[\w./-]+/run/[\w-]+", p.stderr + p.stdout)
         if m:  # the CLI's stderr hides the cause; `runs get` has it (billing cap, provider error, ...)
             g = subprocess.run(["deepline", "runs", "get", m.group(0)], capture_output=True, text=True)

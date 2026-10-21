@@ -42,7 +42,8 @@ def _lead(r, custom):
             "custom_fields": {k: r.get(k, "") for k in custom}}
 
 
-def push(rows, campaign_id, custom=(), allowed=("verified",), dry_run=False, api_key=None, registry=REGISTRY, source_file=""):
+def push(rows, campaign_id, custom=(), allowed=("verified",), dry_run=False, api_key=None, registry=REGISTRY, source_file="",
+         allow_domain_mismatch=False):
     """Return (pushed_rows, refused) where refused is [(row, reason)]. A failed batch, or a response reporting fewer accepted
     than sent, raises RuntimeError (no URL or key in it) and that batch is not recorded. `registry` accumulates every pushed
     email across runs and input files; its emails are skipped (read in dry runs too)."""
@@ -55,6 +56,8 @@ def push(rows, campaign_id, custom=(), allowed=("verified",), dry_run=False, api
             refused.append((r, "no_email"))
         elif (r.get("email_status") or "").strip().lower() not in allowed:
             refused.append((r, f"status_{r.get('email_status') or 'missing'}"))
+        elif (r.get("domain_match") or "").strip().lower() == "no" and not allow_domain_mismatch:
+            refused.append((r, "domain_mismatch"))  # a real mailbox at another company = probably a namesake; hand-check first
         elif tool == "smartlead" or r["email"].strip().lower() in done:
             refused.append((r, "already_pushed:smartlead"))  # any campaign: no double sends; delete its registry row to re-push on purpose
         elif tool and tool != "heyreach":  # heyreach is LinkedIn: never blocks an email push
@@ -102,6 +105,7 @@ def main():
     p.add_argument("--custom", default="", help="comma list of CSV columns sent as custom_fields, e.g. first_line,page_topic")
     p.add_argument("--only-status", default="verified", help="comma list of email_status values to push (default verified)")
     p.add_argument("--allow-status", default="", help="extra statuses to allow, e.g. unknown; never catch_all by default")
+    p.add_argument("--allow-domain-mismatch", action="store_true", help="also push rows whose email domain is unrelated to company_domain (domain_match=no); off by default")
     a = p.parse_args()
     if a.selftest:
         return selftest()
@@ -113,7 +117,8 @@ def main():
     custom = [x.strip() for x in a.custom.split(",") if x.strip()]
     out = a.out or str(REGISTRY)
     try:
-        pushed, refused = push(rows, a.campaign_id, custom, split(a.only_status) + split(a.allow_status), a.dry_run, registry=out, source_file=a.leads)
+        pushed, refused = push(rows, a.campaign_id, custom, split(a.only_status) + split(a.allow_status), a.dry_run, registry=out, source_file=a.leads,
+                               allow_domain_mismatch=a.allow_domain_mismatch)
     except RuntimeError as e:
         sys.exit(f"{e}\nstopped mid-push; earlier batches are recorded in {out}; inspect before re-running (the same command skips them)")
     for r, why in refused:
@@ -228,6 +233,14 @@ def selftest():
     finally:
         post = real
         c._reset()
+    # domain_match=no is refused by default (a namesake's real mailbox); --allow-domain-mismatch lets it through
+    post = lambda url, payload, params=None: {"ok": True, "upload_count": len(payload["lead_list"])}
+    calls.clear(); c._reset()
+    rows = [{"email": "ns@other.com", "email_status": "verified", "domain_match": "no"}, {"email": "ok@d.com", "email_status": "verified", "domain_match": "yes"}]
+    pushed, refused = push(rows, "42", api_key="K", registry=None)
+    assert [r["email"] for r in pushed] == ["ok@d.com"] and refused[0][1] == "domain_mismatch"
+    pushed, refused = push(rows, "42", api_key="K", registry=None, allow_domain_mismatch=True)
+    assert len(pushed) == 2 and not refused
     print("OK")
 
 

@@ -18,7 +18,7 @@ metadata:
 - Optional: a per-run spend cap in USD (`--cap-usd`, a total). Default is rows after dedupe x the per-row cap in `waterfall.py`; take the figure from the Spend caps section of `CLAUDE.md`.
 
 **Compute**
-- `outbound/waterfall.py` dedupes (LinkedIn URL, then name + domain), then per batch tries GetLeads, then Deepline `prebuilt/person-to-email-batch`, then (only with `--deep`) FullEnrich. Every candidate is verified (MillionVerifier; BounceBan once if catch-all).
+- `outbound/waterfall.py` dedupes (LinkedIn URL, then name + domain), then per batch runs the providers in `--providers` order, default `getleads,leadmagic,prospeo,fullenrich` (cheapest first; GetLeads charges only on a hit). Every provider gets the LinkedIn URL where it accepts one plus name and company domain. A candidate the provider already marks valid/VERIFIED skips the verifier; everything else goes to MillionVerifier (BounceBan once if catch-all). `deepline-play` is an optional single-call alternative that lets Deepline pick vendors (it may use Hunter, Findymail, PDL).
 - Stop rule: `verified` keep and stop. `catch_all` keep with status and stop. `unknown` keep with status and stop. `discard` drop the candidate and try the next provider. Nothing left: `not_found`. Emails are never built from a name pattern.
 
 **Report**
@@ -30,7 +30,7 @@ metadata:
 2. Plan the run: `uv run python -m outbound.waterfall data/leads.csv --out out/leads_enriched.csv --dry-run`. Show the planned calls and cost. A dry run writes only `<out>.dryrun.csv` / `<out>.dryrun.report.md`, never the real output.
 3. Test on the first 10 rows (`head -11 data/leads.csv > data/leads_test.csv`), real run, inspect the output, then continue.
 4. Real run in batches: `uv run python -m outbound.waterfall data/leads.csv --out out/leads_enriched.csv --batch 150 --cap-usd N`, passing `--cap-usd` from the Spend caps section of `CLAUDE.md` (rows x per-row cap). `/compact` between big runs. Re-runs replay cached calls at $0.
-5. Read `out/leads_enriched.csv.report.md`. If not_found is above 30%, say so plainly and ask before adding `--deep`.
+5. Read `out/leads_enriched.csv.report.md`. If not_found is above 30%, say so plainly and ask before adding `deepline-play` to `--providers` as a last leg.
 6. Split the result: `email_status = verified` is the only set eligible for Smartlead. `catch_all` and `unknown` go to a separate LinkedIn-only track (HeyReach), never Smartlead. `not_found` also goes to the LinkedIn track.
 7. Show a table (counts per status and provider, 5 sample rows per status, spend) and wait for explicit approval. Only then push `verified` rows to Smartlead with `push_smartlead` (records every push in `out/pushed_registry.csv`). Nothing sends without approval.
 
@@ -58,7 +58,8 @@ Catch-all and unknown go to the LinkedIn-only track, never Smartlead. Show me th
 ## Common mistakes
 
 - Guessing emails from a name pattern (first.last@domain). The script refuses to; do not add it by hand.
-- Turning on `--deep` (FullEnrich) by default. It costs more and charges for catch-all results; use it only for the leftover not_found rows.
+- Reordering `--providers` by habit instead of by the `hits per provider` line of the report: the provider that carries your market should run first.
+- Trusting `domain_match=no` rows: FullEnrich and Prospeo return a real, verified mailbox for the person's *current* employer, which is not always the company on your list.
 - Skipping dedupe, so the same person is paid for twice.
 - Sending `catch_all` or `unknown` rows to Smartlead because the count looks small.
 - Running the full list before looking at the first 10 rows.

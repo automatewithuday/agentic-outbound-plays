@@ -29,7 +29,7 @@ Based on Michel Lieben's article "Here's how to Generate Leads With 5 Agentic Ou
 **Steps**
 1. Put `first_name,last_name,company_domain,linkedin_url` in `data/leads.csv` (see `data/leads.example.csv`).
 2. Check `get_fair_use` on the GetLeads MCP, then dry-run: `uv run python -m outbound.waterfall data/leads.csv --out out/leads_enriched.csv --dry-run`.
-3. Run it in batches of 150: GetLeads, then Deepline `prebuilt/person-to-email-batch`; add `--deep` for FullEnrich on the leftovers only.
+3. Run it in batches of 150: GetLeads (LinkedIn URL; charges only on a hit), then LeadMagic (name + domain), then Prospeo (LinkedIn URL + name + domain), then FullEnrich (bulk, async) on whatever is still missing. Change the order with `--providers`.
 4. Every email is verified (MillionVerifier, BounceBan once if catch-all). `verified` stops the waterfall, `catch_all` and `unknown` are stored with their status and stop, `discard` tries the next provider, nothing left is `not_found`.
 5. Read `out/leads_enriched.csv.report.md`. Only `verified` goes to Smartlead; the rest go to a LinkedIn-only track.
 
@@ -205,7 +205,7 @@ linkedin_url, and each lead gets email from one tool only. Send nothing until I 
 
 | Play | Article (ColdIQ) | This repo |
 |---|---|---|
-| 1 | `find_email` | GetLeads, then Deepline `prebuilt/person-to-email-batch`, verified by MillionVerifier / BounceBan (`outbound.waterfall`) |
+| 1 | `find_email` | GetLeads → LeadMagic → Prospeo → FullEnrich (each via Deepline tools), verified by MillionVerifier / BounceBan (`outbound.waterfall`) |
 | 2 | `find_signals` | GetLeads signals and `search_contacts`, Apify job search, optional ListeningKit, `outbound.score_signals` |
 | 3 | `extract_post_engagement` + Trigify monitoring | Deepline `prebuilt/linkedin-post-to-engagers-harvestapi`, GetLeads `add_monitored_profile` |
 | 4 | Job-change signals | Deepline `prebuilt/job-change-check` |

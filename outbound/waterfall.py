@@ -1,5 +1,5 @@
-"""Play 1: email waterfall. GetLeads -> Deepline (-> FullEnrich with --deep), verify, stop rule. Never guesses emails from name patterns."""
-import argparse, contextlib, io, sys, tempfile
+"""Play 1: email waterfall. GetLeads -> LeadMagic -> Prospeo -> FullEnrich (order via --providers), verify, stop rule. Never guesses emails from name patterns."""
+import argparse, contextlib, io, sys, tempfile, time
 from pathlib import Path
 
 from outbound import common as c
@@ -8,7 +8,11 @@ GETLEADS_CREDIT_USD = 0.0  # set to your plan's per-credit price (charged per hi
 DEEPLINE_FIND_USD = 0.15   # per-row estimate AND the hard --max-credits basis (1.5 credits/row). Deepline reports avg 1.07, max 5.06 credits/row for this play; a single provider call was observed at 1.56. Too low = the play halts on RUN_BILLING_CAP_EXCEEDED.
 VERIFY_USD = 0.003
 BOUNCEBAN_USD = 0.02
-FULLENRICH_USD = 0.10
+FULLENRICH_USD = 0.035  # observed 0.35 credits for one contact; FullEnrich bills on match, max observed 164 credits per 50-row call
+LEADMAGIC_USD = 0.034   # 0.34 credits per result (deepline tools describe leadmagic_email_finder)
+PROSPEO_USD = 0.055     # 0.55 credits per result (deepline tools describe prospeo_enrich_person)
+# Provider order = the waterfall. Cheapest first; GetLeads charges only on a hit. Edit here or pass --providers.
+PROVIDERS = "getleads,leadmagic,prospeo,fullenrich"
 PER_ROW_CAP_USD = 0.15     # default total cap = rows x this, when --cap-usd is not given
 OUT_COLS = ["email", "email_status", "email_provider", "verifier", "mx_class", "domain_match", "miss_reason"]
 
@@ -117,12 +121,73 @@ def find_deepline(rows):
     return _match("deepline", rows, out, _items(out), cand)
 
 
+def _lm_cand(d):
+    """LeadMagic rawV2 (verified live): flat {email, status: valid|catch_all|not_found, mx_gateway_type, mx_security_gateway}."""
+    if not d or not d.get("email"):
+        return {"miss_reason": (d or {}).get("message") or "leadmagic:not_found"}
+    mx = "security_gateway" if d.get("mx_security_gateway") else (d.get("mx_gateway_type") or "")
+    return {"email": d["email"], "provider": "leadmagic", "raw_status": d.get("status"), "mx_class": mx}
+
+
+def find_leadmagic(rows):
+    """One call per row (name + domain). Each call is cached by its input, so re-runs are free."""
+    # ponytail: sequential subprocess per row (~3 s each); parallelise if 150-row batches feel slow
+    return [_lm_cand(c.deepline_action("leadmagic_email_finder",
+                                       {"first_name": r["first_name"], "last_name": r["last_name"], "domain": r["company_domain"]},
+                                       LEADMAGIC_USD)) for r in rows]
+
+
+def _prospeo_cand(d):
+    """Prospeo rawV2 (verified live): {person: {email: {email, status: VERIFIED|..., verification_method}}}."""
+    em = (((d or {}).get("person") or {}).get("email") or {}) if isinstance(d, dict) else {}
+    if not em.get("email"):
+        return {"miss_reason": (d or {}).get("error") or "prospeo:not_found"}
+    return {"email": em["email"], "provider": "prospeo", "raw_status": em.get("status"), "mx_class": em.get("email_mx_provider") or ""}
+
+
+def find_prospeo(rows):
+    """One call per row: LinkedIn URL (highest accuracy) plus name and domain so Prospeo can cross-check the company."""
+    def params(r):
+        p = {"first_name": r["first_name"], "last_name": r["last_name"], "company_domain": r["company_domain"]}
+        if r.get("linkedin_url"):
+            p["linkedin_url"] = r["linkedin_url"]
+        return p
+    return [_prospeo_cand(c.deepline_action("prospeo_enrich_person", params(r), PROSPEO_USD)) for r in rows]
+
+
+def _fe_rows(out):
+    """FullEnrich batch -> rows shaped for _match: input echoes professional_network_url/first_name/last_name/company_domain."""
+    rows = []
+    for d in (out or {}).get("data") or []:
+        inp, ci = d.get("input") or {}, d.get("contact_info") or {}
+        best = ci.get("most_probable_work_email") or {}
+        rows.append({"linkedin_url": inp.get("professional_network_url"), "first_name": inp.get("first_name"),
+                     "last_name": inp.get("last_name"), "company_domain": inp.get("company_domain"),
+                     "email": best.get("email"), "status": best.get("status")})
+    return rows
+
+
+def _fe_cand(d):
+    if not d.get("email"):
+        return {"miss_reason": "fullenrich:not_found"}
+    return {"email": d["email"], "provider": "fullenrich", "raw_status": d.get("status")}  # HIGH_PROBABILITY etc -> verifier decides
+
+
 def find_fullenrich(rows):
-    """--deep. Async job; deepline_action blocks until terminal. Params/shape per provider-playbooks/fullenrich.md (unverified)."""
+    """Bulk (<=50) async job; waits, then polls fullenrich_get_result (free) until FINISHED."""
     data = [{"first_name": r["first_name"], "last_name": r["last_name"], "domain": r["company_domain"],
              "linkedin_url": r.get("linkedin_url") or None, "enrich_fields": ["contact.emails"]} for r in rows]
-    out = c.deepline_action("fullenrich_bulk_enrich", {"name": "play-1", "data": data}, FULLENRICH_USD * len(rows))
-    return _match("fullenrich", rows, out, _items(out, "datas"), lambda d: _cand(d, "fullenrich"))
+    out = c.deepline_action("fullenrich_bulk_enrich", {"name": "play-1", "data": data, "max_wait_ms": 90000}, FULLENRICH_USD * len(rows))
+    for _ in range(20):  # ponytail: up to ~2 min of polling; a batch still IN_PROGRESS after that stays a miss and reruns later
+        if out is None or (out.get("status") or "").upper() == "FINISHED":
+            break
+        time.sleep(6)
+        out = c.deepline_action("fullenrich_get_result", {"enrichment_id": out.get("id")}, 0.0, max_age_days=0.0001) or out
+    return _match("fullenrich", rows, out, _fe_rows(out), _fe_cand)
+
+
+FINDERS = {"getleads": find_getleads, "leadmagic": find_leadmagic, "prospeo": find_prospeo, "fullenrich": find_fullenrich,
+           "deepline-play": find_deepline}  # deepline-play = Deepline's own prebuilt waterfall (vendor order not yours)
 
 
 def _cand(d, default_provider):
@@ -225,7 +290,7 @@ def main(argv=None):
     ap = c.cli_common(argparse.ArgumentParser(description=__doc__))
     ap.add_argument("input", nargs="?")
     ap.add_argument("--batch", type=int, default=150)
-    ap.add_argument("--deep", action="store_true", help="also try FullEnrich (charges for catch-all; off by default)")
+    ap.add_argument("--providers", default=PROVIDERS, help=f"waterfall order, comma list of {','.join(FINDERS)} (default {PROVIDERS})")
     a = ap.parse_args(argv)
     if a.selftest:
         return selftest()
@@ -240,7 +305,10 @@ def main(argv=None):
     print(f"dedupe: {len(rows)} -> {len(ded)} rows ({len(rows) - len(ded)} removed)")
     if a.cap_usd is None:
         c.set_cap(len(ded) * PER_ROW_CAP_USD)
-    finders = [("getleads", find_getleads), ("deepline", find_deepline)] + ([("fullenrich", find_fullenrich)] if a.deep else [])
+    names = [n.strip() for n in a.providers.split(",") if n.strip()]
+    if bad := [n for n in names if n not in FINDERS]:
+        raise SystemExit(f"--providers: unknown {bad}; choose from {','.join(FINDERS)}")
+    finders = [(n, FINDERS[n]) for n in names]
     out, aborted = [], False
     for b in c.batches(ded, a.batch):
         if aborted:  # rows are never dropped
@@ -304,6 +372,19 @@ def selftest():
     assert out[0]["domain_match"] == "yes"
     assert _domain_match("eric@clorox.com", "thecloroxcompany.com") == "yes" and _domain_match("a@chagaroot.com", "lakanto.com") == "no"
     assert _domain_match("k@sunbum.com", "www.sunbum.com") == "yes" and _domain_match("", "x.com") == ""
+    # provider parsers, fixtures copied from real responses (out/probe/*.json, 21 Oct 2026)
+    lm = {"email": "megan.imbres@onepeloton.com", "status": "valid", "mx_gateway_type": "Cloud Mailbox Host", "mx_security_gateway": False}
+    assert _lm_cand(lm) == {"email": "megan.imbres@onepeloton.com", "provider": "leadmagic", "raw_status": "valid", "mx_class": "Cloud Mailbox Host"}
+    assert _lm_cand({"email": None, "message": "no match"})["miss_reason"] == "no match" and not _lm_cand(None).get("email")
+    pr = {"person": {"email": {"status": "VERIFIED", "email": "jason.bunge@hasbro.com", "email_mx_provider": "Microsoft"}}}
+    assert _prospeo_cand(pr) == {"email": "jason.bunge@hasbro.com", "provider": "prospeo", "raw_status": "VERIFIED", "mx_class": "Microsoft"}
+    assert _resolve(_prospeo_cand(pr)) == ("verified", "provider") and not _prospeo_cand({"person": {"email": None}}).get("email")
+    fe = {"status": "FINISHED", "data": [{"input": {"professional_network_url": "https://www.linkedin.com/in/tulaniandre", "first_name": "Tulani",
+          "last_name": "André", "company_domain": "nationalgeographic.com"}, "contact_info": {"most_probable_work_email": {"email": "t@zalando.de", "status": "HIGH_PROBABILITY"}}}]}
+    fr = _fe_rows(fe); assert fr[0]["email"] == "t@zalando.de" and fr[0]["linkedin_url"].endswith("/tulaniandre")
+    cands = _match("fullenrich", [{"first_name": "Tulani", "last_name": "André", "company_domain": "nationalgeographic.com", "linkedin_url": "https://www.linkedin.com/in/tulaniandre/"}], fe, fr, _fe_cand)
+    assert cands[0]["email"] == "t@zalando.de" and cands[0]["raw_status"] == "HIGH_PROBABILITY" and _norm("HIGH_PROBABILITY") == "unknown"
+    assert all(n in FINDERS for n in PROVIDERS.split(","))
     # a provider that raises (billing cap, bad shape) keeps the rows, records why, and the next provider still runs
     c._reset(); calls.clear()
     def boom(rows): raise RuntimeError("RUN_BILLING_CAP_EXCEEDED")

@@ -1,10 +1,10 @@
 # Michel Lieben — Here's how to Generate Leads With 5 Agentic Outbound Workflows in Claude Code
-Source: https://x.com/MichLieben/status/2100264228947107996
-Captured 21 Oct 2026; author Michel Lieben, CEO ColdIQ; this repo's Play 1-5 map to the article's Workflow 1-5
+Condensed reference notes on Michel Lieben's article, not the original text — read the original at https://x.com/MichLieben/status/2100264228947107996
+This repo's Play 1-5 correspond to the article's Workflow 1-5; tool substitutions are listed in README
 
-## Appendix A — Article text (captured 21 Oct 2026 from logged-in Chrome)
+## Appendix A — Article text
 
-Source: https://x.com/MichLieben/status/2100264228947107996 — Michel Lieben (@MichLieben), CEO ColdIQ. "Here's how to Generate Leads With 5 Agentic Outbound Workflows in Claude Code". 4,085 views at capture. The article says "Workflow"; our repo says "Play". The article's ColdIQ / Instantly / lemlist / Trigify references map to GetLeads+Deepline+Apify / Smartlead / HeyReach / GetLeads monitoring in the plan above. Save to `docs/reference/2026-09-16-lieben-5-agentic-outbound-workflows.md` in Phase 0.
+Source: https://x.com/MichLieben/status/2100264228947107996 — Michel Lieben (@MichLieben), CEO ColdIQ. "Here's how to Generate Leads With 5 Agentic Outbound Workflows in Claude Code". 4,085 views at capture. The article says "Workflow"; our repo says "Play". The article's ColdIQ / Instantly / lemlist / Trigify references map to GetLeads+Deepline+Apify / Smartlead / HeyReach / GetLeads monitoring.
 
 ### Framework
 Funnel behind his agency booked 100+ meetings/month for 3 years. Prospects who had seen them 3+ times converted 2-3x better on identical copy. Five workflows by audience temperature:

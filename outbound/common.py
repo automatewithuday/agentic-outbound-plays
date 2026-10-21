@@ -1,5 +1,5 @@
 """Shared helpers for all Plays: env, disk cache, spend ledger, HTTP/CLI wrappers, CSV, dedupe, suppression."""
-import argparse, csv, hashlib, json, os, subprocess, sys, time
+import argparse, csv, hashlib, json, math, os, subprocess, sys, time
 from collections import defaultdict
 from datetime import date
 from pathlib import Path
@@ -86,7 +86,7 @@ def report():
     return head + f" over {len(SPENT['calls'])} calls; by label: " + ", ".join(f"{k} ${v:.4f}" for k, v in sorted(by.items()))
 
 
-def _call(key, usd, label, fn):
+def _call(key, usd, label, fn, max_age_days=None):
     """Common path for every paid wrapper: dry-run records and returns None; else cached, spending only on a miss."""
     if SPENT["dry_run"]:
         spend(usd, label)  # ponytail: dry-run counts a cached call at full price (conservative)
@@ -96,7 +96,7 @@ def _call(key, usd, label, fn):
         spend(usd, label)
         return fn()
 
-    return cached(key, run)
+    return cached(key, run, max_age_days)
 
 
 # ---- API wrappers ----
@@ -145,19 +145,29 @@ def _deepline(argv):
     return json.loads(p.stdout)
 
 
+DEEPLINE_CREDIT_USD = 0.10  # EDIT ME: USD per Deepline credit on your plan; used to turn the USD estimate into a hard --max-credits
+
+
 def deepline_play(play_id, *, csv_path=None, input=None, usd_estimate=0.0):
-    # argv from `deepline plays run --help` (v0.3.397): --input <json|@file>, --json. csv goes in the play input as "csv".
+    # argv from `deepline plays run --help` (v0.3.397): --input <json|@file>, --json, --max-credits. csv goes in the play input as "csv".
     payload = dict(input or {})
     if csv_path:
         payload["csv"] = str(csv_path)
     argv = ["deepline", "plays", "run", play_id, "--input", json.dumps(payload), "--json"]
-    return _call(_json_key("play", argv), usd_estimate, f"deepline:{play_id}", lambda: _deepline(argv))
+    if usd_estimate > 0:  # hard cap enforced by Deepline itself
+        argv += ["--max-credits", str(math.ceil(round(usd_estimate / DEEPLINE_CREDIT_USD, 6)))]
+    # cache on content, not on the temp path in argv
+    ident = dict(payload)
+    if csv_path:
+        ident["csv"] = hashlib.sha256(Path(csv_path).read_bytes()).hexdigest()
+    return _call(_json_key("play", play_id, ident), usd_estimate, f"deepline:{play_id}", lambda: _deepline(argv))
 
 
-def deepline_action(action_id, params, usd_estimate):
+def deepline_action(action_id, params, usd_estimate, max_age_days=None):
     # No `deepline actions run` exists in 0.3.397; the equivalent is `deepline tools execute <id> --input <json> --json`.
+    # Estimate-only cap (no per-call credit flag).
     argv = ["deepline", "tools", "execute", action_id, "--input", json.dumps(params), "--json"]
-    return _call(_json_key("action", argv), usd_estimate, f"deepline:{action_id}", lambda: _deepline(argv))
+    return _call(_json_key("action", argv), usd_estimate, f"deepline:{action_id}", lambda: _deepline(argv), max_age_days)
 
 
 # ---- CSV ----
@@ -207,6 +217,7 @@ def dedupe(rows, keys):
 
 
 _TRUE = {"1", "true", "yes", "y", "t"}
+_OPEN_STAGES = {"open", "proposal", "negotiation"}
 _FREEMAIL = {"gmail.com", "outlook.com", "hotmail.com", "yahoo.com", "icloud.com", "proton.me", "protonmail.com"}
 
 
@@ -219,16 +230,21 @@ def suppress(rows, crm_rows, touched_days=14, today=None):
     in a sequence, a customer, or touched within touched_days. Dropped rows get `suppress_reason`."""
     today = today or date.today()
     idx = {"email": {}, "li": {}, "domain": {}}
-    for c in crm_rows:
+    for n, c in enumerate(crm_rows, 2):  # n = CSV line number (header is line 1)
         reasons = []
-        if (c.get("stage") or "").strip().lower() == "open":
+        if (c.get("stage") or "").strip().lower() in _OPEN_STAGES:
             reasons.append("open_opportunity")
         if (c.get("in_sequence") or "").strip().lower() in _TRUE:
             reasons.append("in_sequence")
         if (c.get("is_customer") or "").strip().lower() in _TRUE:
             reasons.append("customer")
         lt = (c.get("last_touched") or "").strip()[:10]
-        if lt and (today - date.fromisoformat(lt)).days <= touched_days:
+        try:
+            age = (today - date.fromisoformat(lt)).days if lt else None
+        except ValueError:
+            who = c.get("email") or c.get("linkedin_url") or c.get("domain") or "?"
+            raise SystemExit(f"CRM export line {n} ({who}): last_touched {lt!r} is not ISO YYYY-MM-DD")
+        if age is not None and age <= touched_days:
             reasons.append(f"touched_within_{touched_days}d")
         if not reasons:
             continue
@@ -308,12 +324,30 @@ def selftest():
         deepline_action("some_action", {}, 0.4); raise AssertionError("dry-run cap not enforced")
     except SpendCapExceeded:
         pass
-    assert deepline_play("p", csv_path="x.csv", usd_estimate=0.1) is None and "planned" in report()
+    d0 = Path(tempfile.mkdtemp())
+    (d0 / "x.csv").write_text("a\n1\n")
+    assert deepline_play("p", csv_path=d0 / "x.csv", usd_estimate=0.1) is None and "planned" in report()
     # live path: spends only on cache miss
     _reset(cap=None)
     k = []
     assert _call("live", 0.5, "t", lambda: k.append(1) or "r") == "r" and _call("live", 0.5, "t", lambda: 1 / 0) == "r"
     assert SPENT["usd"] == 0.5 and k == [1]
+    # deepline_play: same CSV bytes at two paths -> one call; --max-credits = ceil(usd / DEEPLINE_CREDIT_USD)
+    global _deepline
+    real_dl, argvs = _deepline, []
+    _deepline = lambda argv: argvs.append(argv) or {"rows": []}
+    try:
+        _reset()
+        d1, d2 = Path(tempfile.mkdtemp()), Path(tempfile.mkdtemp())
+        for d in (d1, d2):
+            (d / "in.csv").write_text("a\n1\n")
+        deepline_play("pp", csv_path=d1 / "in.csv", usd_estimate=0.25); deepline_play("pp", csv_path=d2 / "in.csv", usd_estimate=0.25)
+        assert len(argvs) == 1 and argvs[0][argvs[0].index("--max-credits") + 1] == "3", argvs  # cache hit across paths; ceil(2.5)
+        (d2 / "in.csv").write_text("a\n2\n"); deepline_play("pp", csv_path=d2 / "in.csv", usd_estimate=0.25)
+        assert len(argvs) == 2  # different content -> miss
+        deepline_play("free", input={"k": 1}); assert "--max-credits" not in argvs[-1]
+    finally:
+        _deepline = real_dl
     _reset()
 
     # normalize_status
@@ -346,6 +380,11 @@ def selftest():
     kept, dropped = suppress(people, crm, today=t)
     assert kept == [{"email": "old@old.com"}]
     assert [d["suppress_reason"] for d in dropped] == ["open_opportunity", "in_sequence", "customer", "touched_within_14d"]
+    assert suppress([{"email": "n@n.com"}], [{"email": "n@n.com", "stage": "Negotiation"}], today=t)[0] == []  # open|proposal|negotiation, any case
+    try:
+        suppress(people, [{"email": "bad@x.com", "last_touched": "10/21/2026"}], today=t); raise AssertionError("bad date accepted")
+    except SystemExit as e:
+        assert "line 2" in str(e) and "bad@x.com" in str(e) and "YYYY-MM-DD" in str(e)
 
     # batches + csv round trip
     assert list(batches([1, 2, 3, 4, 5], 2)) == [[1, 2], [3, 4], [5]]

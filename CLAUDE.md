@@ -14,7 +14,7 @@ Five outbound Plays in Claude Code, ordered cold to hot: Play 1 waterfall email 
 # Suppression
 
 Before any push, remove: open opportunities, active sequences, anyone touched in the last 14 days, current customers.
-Source: `data/crm_export.csv` with columns `email,domain,linkedin_url,stage,in_sequence,last_touched,is_customer` (see `data/crm_export.example.csv`). Match on email, linkedin_url or domain.
+Source: `data/crm_export.csv` with columns `email,domain,linkedin_url,stage,in_sequence,last_touched,is_customer` (see `data/crm_export.example.csv`). Match on email, linkedin_url or domain. Accepted values: `stage` is `open`, `proposal` or `negotiation` (any case) for an open opportunity; `in_sequence` and `is_customer` are truthy when `true`, `1` or `yes`; `last_touched` is ISO `YYYY-MM-DD` (a malformed date stops the run naming the CSV line).
 
 # Sending
 
@@ -38,7 +38,7 @@ Source: `data/crm_export.csv` with columns `email,domain,linkedin_url,stage,in_s
 - Play 4: $5/run
 - Play 5: $5/day
 
-Always `--dry-run` first. Batches of 100-200 rows; `/compact` between batches.
+Pass these as `--cap-usd` (Play 1's is per row: multiply by rows). Always `--dry-run` first. Batches of 100-200 rows; `/compact` between batches.
 
 # Conventions
 

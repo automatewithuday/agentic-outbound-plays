@@ -66,6 +66,8 @@ def _match(name, rows, out, res, to_cand):
     for r in rows:
         d = next((by[k] for k in _keys(r) if k in by), None)
         cands.append(to_cand(d) if d else {})
+    if rows and not any(k in by for r in rows for k in _keys(r)):
+        raise RuntimeError(f"{name}: {len(res)} results but none matched an echoed key for {len(rows)} rows after the call was made: {str(out)[:200]}")
     return cands
 
 
@@ -118,11 +120,11 @@ def _cand(d, default_provider):
 
 def verify(email):
     """MillionVerifier; catch_all -> BounceBan once. Returns (status, verifier)."""
-    mv = c.deepline_action("millionverifier_verify_email", {"email": email}, VERIFY_USD) or {}
+    mv = c.deepline_action("millionverifier_verify_email", {"email": email}, VERIFY_USD, max_age_days=30) or {}
     st = _norm(_first(mv, "email_status", "status"))
     if st != "catch_all":
         return st, "millionverifier"
-    bb = c.deepline_action("bounceban_verify_single", {"email": email}, BOUNCEBAN_USD) or {}
+    bb = c.deepline_action("bounceban_verify_single", {"email": email}, BOUNCEBAN_USD, max_age_days=30) or {}
     # ponytail: BounceBan may answer status=verifying; we keep catch_all rather than poll (never goes live either way)
     b = _norm(_first(bb, "email_status", "result"))
     return (b if b in ("verified", "discard") else "catch_all"), "millionverifier+bounceban"
@@ -200,6 +202,9 @@ def main(argv=None):
         ap.error("input CSV and --out are required")
     c.apply_cli(a)
     rows = c.read_csv(a.input)
+    need = ["first_name", "last_name", "company_domain", "linkedin_url"]
+    if missing := [k for k in need if rows and k not in rows[0]]:
+        raise SystemExit(f"{a.input}: missing required column(s): {', '.join(missing)} (need {','.join(need)})")
     ded = c.dedupe(c.dedupe(rows, ["linkedin_url"]), ["first_name", "last_name", "company_domain"])
     print(f"dedupe: {len(rows)} -> {len(ded)} rows ({len(rows) - len(ded)} removed)")
     if a.cap_usd is None:
@@ -265,7 +270,7 @@ def selftest():
     find_getleads, find_deepline, verify = real
     seen2, dl = [], []
     orig = c.deepline_action
-    c.deepline_action = lambda aid, p, u: seen2.append(aid) or ({"status": "catch_all"} if aid.startswith("million") else {"status": "risky"})
+    c.deepline_action = lambda aid, p, u, **k: seen2.append(aid) or ({"status": "catch_all"} if aid.startswith("million") else {"status": "risky"})
     try:
         c._reset()
         out, _ = run(mk(1), [("getleads", fake({"f0": cand("c@x.com")})), ("deepline", lambda r: dl.append(r) or [cand("WRONG@x.com")])])
@@ -293,18 +298,22 @@ def selftest():
     except RuntimeError as e:
         assert "deepline" in str(e) and "weird" in str(e)
     assert _match("t", rws, None, [], _cand) == [{}, {}]  # dry-run
+    try:
+        _match("deepline", rws, {"zzz": 1}, [{"email": "q@x.com"}], _cand); raise AssertionError("no-key-match must raise")
+    except RuntimeError as e:
+        assert "deepline" in str(e) and "none matched" in str(e) and "zzz" in str(e)
     # real verify(): catch-all calls BounceBan exactly once; plain valid never does
     find_getleads, find_deepline, verify = real
     seen = []
     orig = c.deepline_action
-    def fa(aid, params, usd):
+    def fa(aid, params, usd, **k):
         seen.append(aid)
         return {"status": "catch_all"} if aid.startswith("million") else {"status": "risky"}
     c.deepline_action = fa
     try:
         c._reset()
         assert verify("c@x.com") == ("catch_all", "millionverifier+bounceban") and seen == ["millionverifier_verify_email", "bounceban_verify_single"]
-        seen.clear(); c.deepline_action = lambda a, p, u: seen.append(a) or {"status": "ok"}
+        seen.clear(); c.deepline_action = lambda a, p, u, **k: seen.append(a) or {"status": "ok"}
         assert verify("o@x.com") == ("verified", "millionverifier") and len(seen) == 1
     finally:
         c.deepline_action = orig
@@ -335,6 +344,11 @@ def selftest():
         assert main([str(td / "in.csv"), "--out", str(td / "o.csv"), "--dry-run"]) == 0
     assert c.SPENT["usd"] == 0.0 and len(c.read_csv(td / "o.csv.dryrun.csv")) == 3 and (td / "o.csv.dryrun.report.md").exists()
     assert not (td / "o.csv").exists() and not (td / "o.csv.report.md").exists()  # real artifacts untouched
+    c.write_csv(td / "bad.csv", [{"first_name": "a", "company_domain": "x.com"}])
+    try:
+        main([str(td / "bad.csv"), "--out", str(td / "b.csv"), "--dry-run"]); raise AssertionError("missing columns accepted")
+    except SystemExit as e:
+        assert "last_name" in str(e) and "linkedin_url" in str(e)
     c._reset()
     print("OK")
     return 0

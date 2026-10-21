@@ -7,10 +7,18 @@ Based on Michel Lieben's article "Here's how to Generate Leads With 5 Agentic Ou
 1. Clone this repo.
 2. `cp .env.example .env` and fill in your keys.
 3. `uv sync`
-4. Connect the GetLeads MCP: `claude mcp add getleads ...` (exact command: see the docs at https://app.getleads.io).
+4. Connect the GetLeads MCP: open https://app.getleads.io → Settings → MCP and copy the `claude mcp add getleads ...` command shown there.
 5. Install Deepline: follow https://code.deepline.com/INSTALL.md.
 6. Write your rules into `CLAUDE.md`. The ICP section is the only edit you need.
 7. Test with ONE company before running a list.
+
+## First-run checklist
+
+- [ ] HeyReach connected through the GetLeads MCP tool `configure_heyreach`.
+- [ ] A Smartlead campaign created in the Smartlead UI and kept in DRAFT/paused until the copy is written and you have approved it; its id copied for `--campaign-id`.
+- [ ] `data/crm_export.csv` exists (no CRM yet? copy the header row of `data/crm_export.example.csv`). Accepted values: `stage` `open|proposal|negotiation`, `in_sequence`/`is_customer` `true|1|yes`, `last_touched` `YYYY-MM-DD`.
+- [ ] `cp .env.example .env` and filled in.
+- [ ] `uv run python -m outbound.common --selftest` prints `OK`.
 
 ## Play 1 · Waterfall email finder (cold)
 
@@ -36,7 +44,7 @@ Catch-all and unknown never go to Smartlead. Wait for my approval before pushing
 
 **Why it works:** no single vendor covers every region, so chaining them lifts coverage. GetLeads charges only on a hit, so the cheap first step costs nothing on misses, and the stop rule means you pay for the next provider only when needed.
 
-**What you get:** `out/leads_enriched.csv` with every input row kept plus the six email columns, and a report with coverage percentages and spend. Aim for bounces under 2%.
+**What you get:** `out/leads_enriched.csv` with every deduplicated row kept plus the six email columns, and a report with coverage percentages and spend. Aim for bounces under 2%.
 
 ## Play 2 · Signal scoring (warm)
 
@@ -109,7 +117,7 @@ and Smartlead, T2 and T3 to Smartlead only, one email tool per lead. Send nothin
 
 **Steps**
 1. Put `name,email,linkedin_url,old_company,old_company_domain,role` in `data/champions.csv` (see `data/champions.example.csv`). Only people you actually helped.
-2. Check for moves with Deepline: `deepline plays run prebuilt/job-change-check --csv data/champions.csv --columns.company_domain old_company_domain --max-credits N`. It costs 1.96 credits only per `moved` row. Statuses: `moved | no_change | left_company | unknown | profile_unavailable | no_new_company`.
+2. Check for moves with Deepline in three commands: `deepline plays describe prebuilt/job-change-check`, then `deepline plays run prebuilt/job-change-check --csv data/champions.csv --columns.company_domain old_company_domain --max-credits N --run-id-file out/champions_run.json`, then `deepline runs export <run-id> --out out/champions_checked.csv` (run id from the run-id file). It costs 1.96 credits only per `moved` row. Statuses: `moved | no_change | left_company | unknown | profile_unavailable | no_new_company`.
 3. Keep fresh movers: `uv run python -m outbound.filter out/champions_checked.csv --out out/movers.csv --keep-regex 'job_change.status=^moved$' --days job_change.date=14..45 --neq job_change.new_company,old_company`.
 4. GetLeads `lookup_company` on each new employer; Claude drops anyone outside the `CLAUDE.md` ICP with a one-line reason.
 5. Find the new email with `uv run python -m outbound.waterfall`. If the champion is not the buyer, GetLeads `lookup_decision_makers` adds the budget owner.
@@ -140,7 +148,7 @@ details, no usage data, no contract terms. Show every draft in a table and send 
 1. One time: GetLeads MCP `get_wallet_balance`, then `start_website_visitor_tracking(domain)`, paste the install snippet into `<head>`, `configure_website_pixel` (webhook and privacy), then `complete_website_pixel_setup` (needs auto top-up). Update your privacy policy and consent first. People are named mostly for US and Canadian visitors; elsewhere expect the company only.
 2. Daily: `export_website_visitor_leads` (or `list_website_visitor_leads view=unique`) into `data/visitors_<date>.csv`. Check the header for the page column; `page` below is an example.
 3. Keep high-intent pages: `uv run python -m outbound.filter data/visitors_<date>.csv --out out/visitors_intent.csv --keep-regex 'page=pricing|demo|case-stud|compar|vs-'`, then `--suppress data/crm_export.csv`.
-4. Claude scores each company against `CLAUDE.md` and saves `out/visitors_icp.csv`. For ICP companies with no named person, `lookup_decision_makers` finds the buyer by your titles; append them as `email_status=verified`.
+4. Claude scores each company against `CLAUDE.md` and saves `out/visitors_icp.csv`. Add an empty `email_status` column to every row first (one `python -c` one-liner, see the skill). For ICP companies with no named person, `lookup_decision_makers` finds the buyer by your titles; append them as `email_status=verified`. The waterfall input needs `first_name,last_name,company_domain,linkedin_url`, so map the visitor export columns to those names (person name split to first/last, company website to `company_domain`, person LinkedIn to `linkedin_url`) before step 5.
 5. Split with `outbound.filter` (`--keep-regex 'email_status=^verified$'` and `'email_status=^(?!verified)'`), run `uv run python -m outbound.waterfall` on the not-verified rows, and merge both into `out/visitors_final.csv`. Derive `page_topic` from the page URL (for example "pricing for multi-seat teams"); the copy never says you saw the visit.
 6. Show the table. Day 1 is always a dry run: `uv run python -m outbound.push_smartlead out/visitors_final.csv --campaign-id ID --custom first_line,page_topic --dry-run`, plus `send_contacts_to_heyreach` with `dry_run: true`. After approval push for real. Smartlead gets only `verified` rows. HeyReach gets ICP rows that have a `linkedin_url`, whatever their email status (LinkedIn is the channel for catch_all, unknown and not_found rows, and a parallel touch for the others). Each lead gets email from one tool only; LinkedIn plus email for the same person is allowed.
 
@@ -159,7 +167,7 @@ linkedin_url, and each lead gets email from one tool only. Send nothing until I 
 
 **Why it works:** intent is concentrated on a few pages. HockeyStack measured 3.8% form-fill on pricing pages against 1.1% site-wide. A suppressed, ICP-scored, verified list with a `page_topic` that fits the page beats blasting everyone the pixel catches.
 
-**What you get:** `out/visitors_final.csv` of ICP-fit, unsuppressed visitors with a verified email and a `page_topic`, a dry-run payload to inspect, and `.pushed.csv` recording what went to Smartlead and when. Run it daily.
+**What you get:** `out/visitors_final.csv` of ICP-fit, unsuppressed visitors with a verified email and a `page_topic`, a dry-run payload to inspect, and `out/pushed_registry.csv` recording what went to Smartlead and when. Run it daily.
 
 ## Build order
 
@@ -185,8 +193,10 @@ linkedin_url, and each lead gets email from one tool only. Send nothing until I 
 - First 100 contacts, then inspect before scaling. Test every Play with one company or 5 rows first.
 - Batches of 100 to 200 rows; `/compact` between batches.
 - Approvals stay on for anything that sends. Every skill ends with a table, your approval, and only then a push.
-- Spend caps are real: `--cap-usd` on scripts, `--max-credits` on Deepline, `estimate_scrape_cost` before any monitored profile. Check `get_fair_use` and `get_wallet_balance` first. Never loop around a cap.
+- Spend caps: HARD caps are Deepline plays (`--max-credits`, derived from the estimate via `DEEPLINE_CREDIT_USD` in `common.py`) and Apify (`maxTotalChargeUsd`). ESTIMATE-based caps (the ledger aborts on its own estimate, the vendor does not enforce it) are GetLeads credits (set `GETLEADS_CREDIT_USD`) and Deepline `tools execute` calls. Also `estimate_scrape_cost` before any monitored profile; check `get_fair_use` and `get_wallet_balance` first. Never loop around a cap.
 - Only `verified` emails reach Smartlead. Catch-all and unknown stay out of live sequences. One email tool per lead.
+- Pushes are recorded in one shared `out/pushed_registry.csv` (read on every run, dry or real). To deliberately re-push a lead, delete its row from `out/pushed_registry.csv`. LinkedIn plus email for the same person is allowed; two email tools is not.
+- `.cache/calls.jsonl` stores raw API responses, including emails, unencrypted and git-ignored. Delete it when a project ends.
 - Suppression runs before every push: open opportunities, active sequences, recent touches and customers come from `data/crm_export.csv`.
 - LinkedIn scraping (Play 3) and visitor identification (Play 5) carry platform and privacy risk. Read the guardrails in each skill.
 - Secrets live in `.env` only. Never paste keys into prompts or commit them.

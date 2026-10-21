@@ -15,7 +15,7 @@ metadata:
 
 **Inputs**
 - `data/leads.csv` with columns `first_name,last_name,company_domain,linkedin_url` (see `data/leads.example.csv`).
-- Optional: a per-run spend cap in USD (`--cap-usd`, a total). Default is 15 cents per row after dedupe.
+- Optional: a per-run spend cap in USD (`--cap-usd`, a total). Default is rows after dedupe x the per-row cap in `waterfall.py`; take the figure from the Spend caps section of `CLAUDE.md`.
 
 **Compute**
 - `outbound/waterfall.py` dedupes (LinkedIn URL, then name + domain), then per batch tries GetLeads, then Deepline `prebuilt/person-to-email-batch`, then (only with `--deep`) FullEnrich. Every candidate is verified (MillionVerifier; BounceBan once if catch-all).
@@ -29,10 +29,10 @@ metadata:
 1. Check balance and fair use: call the GetLeads MCP tool `get_fair_use`. Stop and tell the user if the daily or monthly allowance cannot cover the row count.
 2. Plan the run: `uv run python -m outbound.waterfall data/leads.csv --out out/leads_enriched.csv --dry-run`. Show the planned calls and cost. A dry run writes only `<out>.dryrun.csv` / `<out>.dryrun.report.md`, never the real output.
 3. Test on the first 10 rows (`head -11 data/leads.csv > data/leads_test.csv`), real run, inspect the output, then continue.
-4. Real run in batches: `uv run python -m outbound.waterfall data/leads.csv --out out/leads_enriched.csv --batch 150 [--cap-usd N]`. `/compact` between big runs. Re-runs replay cached calls at $0.
+4. Real run in batches: `uv run python -m outbound.waterfall data/leads.csv --out out/leads_enriched.csv --batch 150 --cap-usd N`, passing `--cap-usd` from the Spend caps section of `CLAUDE.md` (rows x per-row cap). `/compact` between big runs. Re-runs replay cached calls at $0.
 5. Read `out/leads_enriched.csv.report.md`. If not_found is above 30%, say so plainly and ask before adding `--deep`.
 6. Split the result: `email_status = verified` is the only set eligible for Smartlead. `catch_all` and `unknown` go to a separate LinkedIn-only track (HeyReach), never Smartlead. `not_found` also goes to the LinkedIn track.
-7. Show a table (counts per status and provider, 5 sample rows per status, spend) and wait for explicit approval. Only then push `verified` rows to Smartlead. Nothing sends without approval.
+7. Show a table (counts per status and provider, 5 sample rows per status, spend) and wait for explicit approval. Only then push `verified` rows to Smartlead with `push_smartlead` (records every push in `out/pushed_registry.csv`). Nothing sends without approval.
 
 ## Prompt to paste
 

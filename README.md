@@ -1,6 +1,6 @@
-# Martechs Outbound System — 5 agentic outbound Plays in Claude Code (GetLeads + Deepline + Apify, no ColdIQ needed)
+# Martechs Outbound System — 5 agentic outbound Plays in Claude Code (GetLeads + Deepline + Apify)
 
-Based on Michel Lieben's article "Here's how to Generate Leads With 5 Agentic Outbound Workflows in Claude Code" (https://x.com/MichLieben/status/2100264228947107996). The article uses ColdIQ; this repo reproduces the same five workflows (called Plays here) with substitutions: ColdIQ → GetLeads / Deepline / Apify, Instantly → Smartlead, lemlist → HeyReach, Trigify → GetLeads profile monitoring. Bring your own keys.
+Five outbound Plays that run from Claude Code, ordered by audience temperature: a cold email waterfall, signal-scored accounts, LinkedIn post engagers, champions who changed jobs, and identified website visitors. Data comes from GetLeads, Deepline and Apify; sending goes through Smartlead (email) and HeyReach (LinkedIn). Everything drafts, nothing sends without your approval, and every paid call sits behind a spend cap. Bring your own keys; the only file you must edit is the ICP block in `CLAUDE.md`.
 
 ## Before you build: connect once
 
@@ -201,19 +201,13 @@ linkedin_url, and each lead gets email from one tool only. Send nothing until I 
 - LinkedIn scraping (Play 3) and visitor identification (Play 5) carry platform and privacy risk. Read the guardrails in each skill.
 - Secrets live in `.env` only. Never paste keys into prompts or commit them.
 
-## What's different from the article
+## Tool map
 
-| Play | Article (ColdIQ) | This repo |
-|---|---|---|
-| 1 | `find_email` | GetLeads → LeadMagic → Prospeo → FullEnrich (each via Deepline tools), verified by MillionVerifier / BounceBan (`outbound.waterfall`) |
-| 2 | `find_signals` | GetLeads signals and `search_contacts`, Apify job search, Deepline X/Reddit/HN/Bluesky search, `outbound.score_signals` |
-| 3 | `extract_post_engagement` + Trigify monitoring | Deepline `prebuilt/linkedin-post-to-engagers-harvestapi`, GetLeads `add_monitored_profile` |
-| 4 | Job-change signals | Deepline `prebuilt/job-change-check` |
-| 5 | `setup_website_visitors` | GetLeads website pixel and `export_website_visitor_leads` |
-| Sending | Instantly (email), lemlist (LinkedIn and email) | Smartlead (email), HeyReach through GetLeads (LinkedIn) |
-
-## Prefer ColdIQ?
-
-`claude mcp add coldiq --scope user -e COLDIQ_API_KEY=<key> -- npx -y @coldiq/mcp@latest`
-Map: find_email → Play 1, find_signals → Play 2, extract_post_engagement → Play 3, job-change signals → Play 4, setup_website_visitors → Play 5.
-Disclosure: ColdIQ is the article author's company.
+| Play | Tools |
+|---|---|
+| 1 | GetLeads → LeadMagic → Prospeo → FullEnrich (each via Deepline tools), verified by MillionVerifier / BounceBan (`outbound.waterfall`) |
+| 2 | Crustdata funding discovery and PredictLeads events (Deepline), GetLeads `search_contacts`, Apify job search, Deepline X/Reddit/HN/Bluesky search, `outbound.score_signals` |
+| 3 | Deepline `prebuilt/linkedin-post-to-engagers-harvestapi`, GetLeads `add_monitored_profile` |
+| 4 | Deepline `prebuilt/job-change-check` |
+| 5 | GetLeads website pixel and `export_website_visitor_leads` |
+| Sending | Smartlead (email, `outbound.push_smartlead`), HeyReach (LinkedIn, `outbound.push_heyreach` or GetLeads `send_contacts_to_heyreach`) |

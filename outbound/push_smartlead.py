@@ -5,7 +5,8 @@ read at the start of every run (real and dry) so no lead is emailed twice, from 
 delete its row from out/pushed_registry.csv.
 A row's own `pushed_to` column: `smartlead` or any OTHER email tool is refused; `heyreach` (LinkedIn) never blocks an email push,
 so LinkedIn plus email for the same person is allowed. --out overrides the registry path (used by the selftest).
-A response that reports fewer accepted leads than sent stops the run with a non-zero exit and is NOT recorded."""
+A response that reports fewer accepted leads than sent (added_count < sent) is still recorded as pushed, with a loud WARN:
+Smartlead only skips leads it must never receive again (block list, unsubscribe list, bounce list, duplicate in another campaign)."""
 import argparse, contextlib, io, json, os, sys, tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,10 +15,10 @@ import httpx
 
 from outbound import common as c
 
-URL = "https://server.smartlead.ai/api/v1/campaigns/{id}/leads"  # from the brief; not verified against api.smartlead.ai/reference
+URL = "https://server.smartlead.ai/api/v1/campaigns/{id}/leads"  # verified against api.smartlead.ai/api-reference/campaigns/add-leads (21 Oct 2026)
 REGISTRY = c.ROOT / "out" / "pushed_registry.csv"
 REG_COLS = ["email", "pushed_to", "campaign_id", "pushed_at", "source_file"]
-BATCH = 100  # Smartlead's max leads per request
+BATCH = 100  # docs allow 400 per request; 100 keeps each approval-sized push small and a failed batch cheap to inspect
 SETTINGS = {"ignore_global_block_list": False, "ignore_unsubscribe_list": False, "ignore_duplicate_leads_in_other_campaign": False}
 
 
@@ -27,26 +28,35 @@ def post(url, payload, params=None):
     return r.json()
 
 
+ACCEPTED_FIELDS = ("added_count", "upload_count", "total_leads")  # documented: added_count (+ skipped_count); the others are legacy names
+
+
 def _ints(body, key=""):
-    """Yield (name, int) for upload_count / total_leads anywhere in a JSON body; every other field is ignored."""
+    """Yield (name, int) for the accepted-count fields anywhere in a JSON body; every other field is ignored."""
     if isinstance(body, dict):
         for k, v in body.items():
             yield from _ints(v, str(k).lower())
-    elif isinstance(body, int) and not isinstance(body, bool) and key in ("upload_count", "total_leads"):
+    elif isinstance(body, int) and not isinstance(body, bool) and key in ACCEPTED_FIELDS:
         yield key, body
 
 
 def _lead(r, custom):
-    return {"email": r["email"].strip(), "first_name": r.get("first_name", ""), "last_name": r.get("last_name", ""),
+    """Documented lead fields: email (required), first_name, last_name, company_name, website, linkedin_profile, custom_fields."""
+    lead = {"email": r["email"].strip(), "first_name": r.get("first_name", ""), "last_name": r.get("last_name", ""),
             "company_name": r.get("company_name") or r.get("company", ""),
             "custom_fields": {k: r.get(k, "") for k in custom}}
+    if r.get("linkedin_url"):
+        lead["linkedin_profile"] = r["linkedin_url"]
+    if r.get("company_domain"):
+        lead["website"] = r["company_domain"]
+    return lead
 
 
 def push(rows, campaign_id, custom=(), allowed=("verified",), dry_run=False, api_key=None, registry=REGISTRY, source_file="",
          allow_domain_mismatch=False):
-    """Return (pushed_rows, refused) where refused is [(row, reason)]. A failed batch, or a response reporting fewer accepted
-    than sent, raises RuntimeError (no URL or key in it) and that batch is not recorded. `registry` accumulates every pushed
-    email across runs and input files; its emails are skipped (read in dry runs too)."""
+    """Return (pushed_rows, refused) where refused is [(row, reason)]. A failed batch (HTTP error) raises RuntimeError (no URL
+    or key in it) and that batch is not recorded; a short added_count is recorded and warned about. `registry` accumulates
+    every pushed email across runs and input files; its emails are skipped (read in dry runs too)."""
     ok, refused = [], []
     prior = c.read_csv(registry) if registry and Path(registry).exists() else []
     done = {(r.get("email") or "").strip().lower() for r in prior}
@@ -84,12 +94,14 @@ def push(rows, campaign_id, custom=(), allowed=("verified",), dry_run=False, api
                 print(f"smartlead response (batch 1): {json.dumps(body)[:300]}")
             counts = list(_ints(body))
             if not counts:
-                print("no upload_count in response; cannot verify accepted count")
+                print("no added_count in response; cannot verify accepted count")
             short = [(k, v) for k, v in counts if v < len(chunk)]
             if short:
-                print(f"WARN accepted {short[0][1]} < sent {len(chunk)} ({short[0][0]})")
-                raise RuntimeError(f"smartlead: batch {i + 1} (campaign {campaign_id}) accepted {short[0][1]} < sent {len(chunk)}; "
-                                   f"batch NOT recorded as pushed; inspect the campaign; {len(pushed)} rows pushed this run")
+                # Smartlead skips a lead for its block list, unsubscribe list, community bounce list or a duplicate in another
+                # campaign: every one of those is a reason never to resend. So the whole batch is recorded as pushed and the
+                # gap is shouted, instead of left unrecorded (which would resend the skipped ones on the next run).
+                print(f"WARN smartlead accepted {short[0][1]} of {len(chunk)} in batch {i + 1} ({short[0][0]}; skipped_count={body.get('skipped_count')}). "
+                      f"The skipped leads are on a block/unsubscribe/bounce list or already in another campaign; they are recorded as pushed so they are never resent.")
         new = [{**r, "pushed_to": "smartlead", "campaign_id": campaign_id, "pushed_at": now, "source_file": source_file} for r in chunk]
         pushed += new
         if registry and not dry_run:
@@ -149,20 +161,24 @@ def selftest():
         assert sorted(w for _, w in refused) == ["already_in_otheremailtool", "already_pushed:smartlead", "no_email", "status_catch_all", "status_unknown"]
         assert len(pushed) == 251 and "h@x.com" in [r["email"] for r in pushed]  # heyreach never blocks email
         assert pushed[0]["pushed_to"] == "smartlead" and pushed[0]["campaign_id"] == "42" and pushed[0]["pushed_at"]
-        # accepted-count check: only upload_count / total_leads count; other fields never stop a push
+        # accepted-count check: only added_count (documented) / upload_count / total_leads (legacy) count; a short count WARNs
+        # but still records the batch; other fields (bounce_count, skipped_count) never trigger anything
         real_post = post
-        for body, ok, note in (({"ok": True, "upload_count": 99}, False, False),
-                               ({"ok": True, "upload_count": 100, "bounce_count": 0, "skipped_count": 0}, True, False),
-                               ({"ok": True}, True, True)):
+        for body, warn, note in (({"success": True, "added_count": 99, "skipped_count": 1}, True, False),
+                                 ({"success": True, "added_count": 100, "skipped_count": 0, "bounce_count": 0}, False, False),
+                                 ({"ok": True, "upload_count": 99}, True, False),
+                                 ({"success": True, "message": "Leads added successfully"}, False, True)):
             post = lambda url, payload, params=None, body=body: body; c._reset(); buf = io.StringIO()
-            try:
-                with contextlib.redirect_stdout(buf):
-                    push(rows[:100], "42", api_key="K", registry=None)
-                assert ok, body
-            except RuntimeError:
-                assert not ok, body
-            assert ("no upload_count in response; cannot verify accepted count" in buf.getvalue()) == note, body
+            with contextlib.redirect_stdout(buf):
+                got, _ = push(rows[:100], "42", api_key="K", registry=None)
+            assert len(got) == 100, body  # always recorded
+            assert ("WARN smartlead accepted 99 of 100" in buf.getvalue()) == warn, body
+            assert ("no added_count in response" in buf.getvalue()) == note, body
         post = real_post; calls.clear(); c._reset()
+        # documented optional fields are passed through when present
+        lead = _lead({"email": "a@b.c", "first_name": "A", "linkedin_url": "https://www.linkedin.com/in/a/", "company_domain": "b.c"}, ["first_line"])
+        assert lead["linkedin_profile"].endswith("/in/a/") and lead["website"] == "b.c" and lead["custom_fields"] == {"first_line": ""}
+        assert "linkedin_profile" not in _lead({"email": "a@b.c"}, [])
         # --allow-status lets unknown through, still not catch_all
         calls.clear(); c._reset()
         pushed, refused = push(rows[250:], "42", allowed=["verified", "unknown"], api_key="K", registry=None)
@@ -204,19 +220,12 @@ def selftest():
         with contextlib.redirect_stdout(io.StringIO()):
             pushed, _ = push([{"email": "p3@x.com", "email_status": "verified"}], "9", registry=reg)
         assert len(pushed) == 1
-        # short response: 99 accepted of 100 sent -> WARN, non-zero, batch not recorded
-        post = lambda url, payload, params=None: {"ok": True, "upload_count": 99}
+        # short response: 99 accepted of 100 sent -> WARN, but the batch IS recorded in the registry (skipped leads must never be resent)
+        post = lambda url, payload, params=None: {"success": True, "added_count": 99, "skipped_count": 1}
         d3 = Path(tempfile.mkdtemp()); reg3 = str(d3 / "r.csv"); buf = io.StringIO()
-        try:
-            with contextlib.redirect_stdout(buf):
-                push(rows[:100], "42", api_key="K", registry=reg3)
-            raise AssertionError("short response accepted")
-        except RuntimeError as e:
-            assert "batch 1" in str(e) and "99 < sent 100" in str(e)
-        assert "WARN accepted 99 < sent 100" in buf.getvalue() and '"upload_count": 99' in buf.getvalue() and not Path(reg3).exists()
-        post = lambda url, payload, params=None: {"ok": True, "upload_count": 100, "skipped_count": 0}
-        with contextlib.redirect_stdout(io.StringIO()):
-            push(rows[:100], "42", api_key="K", registry=reg3)
+        with contextlib.redirect_stdout(buf):
+            got, _ = push(rows[:100], "42", api_key="K", registry=reg3)
+        assert len(got) == 100 and "WARN smartlead accepted 99 of 100 in batch 1" in buf.getvalue() and "skipped_count=1" in buf.getvalue()
         assert len(c.read_csv(reg3)) == 100
         post = lambda url, payload, params=None: calls.append((url, payload, params)) or {"ok": True}
         # dry-run: no POST

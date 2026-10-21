@@ -16,7 +16,7 @@ metadata:
 **Inputs**
 - `CLAUDE.md` for the ICP, buyer titles and the pain keywords.
 - `data/tam.csv` with `company_domain,company_name`. Signals only rank a list; they do not build one.
-- `config/signal_scoring.yaml` (weights, freshness windows, bands, ListeningKit threshold). Edit it with your own reply and meeting data. Do not change it without telling the user.
+- `config/signal_scoring.yaml` (weights, freshness windows, bands, social-intent platforms). Edit it with your own reply and meeting data. Do not change it without telling the user.
 - Optional: `data/crm_export.csv`, `data/transcripts/`, Play 5 visitor exports, Play 3 and Play 4 outputs.
 
 **Compute**
@@ -37,7 +37,12 @@ metadata:
 3. Hiring (third party): Apify `harvestapi~linkedin-job-search`, run through `common.apify(actor, run_input, max_usd)` for the TAM domains, with `max_usd` taken from the user's cap. Check the actor's input schema on Apify first; the field names below are an example only. This is a paid run (real money, capped at $1 via `max_usd`): `uv run python -c "from outbound import common as c; print(len(c.apify('harvestapi~linkedin-job-search', {'companies': ['example.com'], 'postedLimit': '1w'}, 1.0)))"`. Count postings from the last 14 days per company and append one `hiring` row per company: `event_date` is the newest matching posting's `postedAt` date from the Apify output (as `YYYY-MM-DD`), `detail` is the number of postings in the window, and `source_url` is that posting's URL. Run `--dry-run`-style first: estimate, show the user, then run.
 4. New exec or job change (third party), only for accounts that already score 40 or more after steps 2 and 3 (run the scorer once to find them): GetLeads `count_contacts` (free) first, then `search_contacts(domains, job_start_date_min, job_titles from CLAUDE.md, email_status: ["VALID"], max_per_company: 2)`. Append `signal_type=job_change, party=third`, `event_date` = the job start date.
 5. News (third party, optional, only with `--news`, only for accounts at 40 or more): `deepline tools execute predictleads_company_news_events --input '<json>' --json`. It costs 0.56 credits per call; state the total before running. Append `signal_type=news, party=third`.
-6. Social intent (third party, optional): Log by ListeningKit MCP. One-time setup: `claude mcp add listeningkit -- https://log.listeningkit.com/mcp --header "Authorization: Bearer <key>"`, or self-host from https://github.com/matthewdonsemail-lab/log. Add the pain keywords from `CLAUDE.md` with `add_keyword`, then `list_matches(min_score = listeningkit.min_score from the yaml, platform)` for each platform in the yaml, and `get_match` for detail. Platforms are Reddit, X and Facebook only. There is no LinkedIn. Claude maps the author or post to a company and confirms the domain with GetLeads `lookup_company`. Skip matches it cannot map. The row carries the post permalink as `source_url`.
+6. Social intent (third party, optional) with Deepline's search tools, all verified live on 22 Oct 2026, run with `deepline tools execute <tool> --input '<json>' --json`:
+   - X: `twitterapi_advanced_search` `{"query": "\"cold email\" reply rate lang:en", "queryType": "Latest"}` (0.003 credits per result, ~20 per page; `data.tweets[]` with `text`, `url`, `createdAt`, and `author.profile_bio.description` + `author.profile_bio.entities.url` so the poster's company can be read).
+   - Reddit: `scrapecreators_reddit_search` `{"query": "...", "sort": "relevance", "timeframe": "month"}` (0.02 credits per call; `posts[]` with `title`, `selftext`, `author`, `permalink`, `score`; `sort: new` returns unrelated fresh posts, so use relevance).
+   - Hacker News: `hackernews_search` `{"query": "..."}` (free; `data.hits[]` with `comment_text`/`story_title`, `author`, `story_url`). Bluesky: `bluesky_search_posts` `{"q": "...", "limit": 25}` (free; `data.posts[]` with `record.text`, `author.handle`, `uri`).
+   - Run each pain keyword from `CLAUDE.md`; keep posts from the last 14 days that are a buyer asking for help or comparing tools, not vendors pitching. Map the author to a company (bio URL, then GetLeads `lookup_company`); append `signal_type=social_intent, party=third` with the post URL as `source_url`. LinkedIn post search exists too (`harvestapi_search_posts`, 0.03 credits per page) but LinkedIn engagers are Play 3's job.
+   - Log by ListeningKit (Reddit/X/Facebook listening with its own MCP) was the original plan here; its hosted sign-up redirected to localhost when tested, and self-hosting needs Convex and Clerk accounts, so it is no longer required.
 7. First-party and second-party rows:
    - `first`: closed-lost and stalled rows in `data/crm_export.csv` (`crm_closed_lost`); `grep -ril "<domain>" data/transcripts/` for each TAM domain (`transcript_mention`, date from the file); Play 5 visitor exports (`website_visit`); engagement on your own posts from Play 3 (`engagement`).
    - `second`: engagement on partner posts (Play 3 pointed at partner profiles) and champions from Play 4 (`engagement`, or `job_change` for a champion who moved).
@@ -52,7 +57,7 @@ Run the Play 2 skill. Read CLAUDE.md for the ICP, buyer titles and pain keywords
 search_companies. For the accounts in the TAM, collect signals into out/signals.csv: funding with list_funding_signals (since 28 days ago,
 limit 200, open each source link and keep only real rounds), hiring with Apify harvestapi~linkedin-job-search, job changes with
 count_contacts then search_contacts only for accounts at 40+, news with predictleads_company_news_events if I pass --news, and
-social intent from ListeningKit list_matches. Keep only signals inside the freshness windows in config/signal_scoring.yaml and drop
+social intent from Deepline X/Reddit/HN/Bluesky search. Keep only signals inside the freshness windows in config/signal_scoring.yaml and drop
 duplicates. Add first-party signals from data/crm_export.csv (closed-lost and stalled) and data/transcripts/, plus Play 5 visits and
 Play 3 engagement; add second-party signals from partner-post engagement and Play 4 champions. Tag each with its party. Run
 uv run python -m outbound.score_signals data/tam.csv --signals out/signals.csv --out out/accounts_scored.csv. For work_today
@@ -68,7 +73,7 @@ valid email. Tell me the cost before each paid step. Show me the table. Send not
 - Weights, windows and bands live in `config/signal_scoring.yaml`. Propose changes; do not edit them silently.
 - Use dates as `YYYY-MM-DD`. The scorer drops blank or malformed dates and unknown types or parties with a warning, so read stderr.
 - Run steps 4 and 5 only for accounts at 40 or more, so you pay for enrichment only where it can change the band.
-- ListeningKit covers Reddit, X and Facebook only. Do not claim LinkedIn social intent.
+- Deepline's social search covers X, Reddit, Hacker News and Bluesky. Do not claim LinkedIn social intent from it; LinkedIn engagement is Play 3.
 - Secrets stay in `.env`; never print them.
 
 ## Common mistakes

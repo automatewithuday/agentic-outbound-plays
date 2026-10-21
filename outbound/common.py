@@ -133,17 +133,6 @@ def apify(actor, run_input, max_usd):
     return _call(_json_key("apify", actor, run_input, max_usd), max_usd, f"apify:{actor}", fn)
 
 
-def listeningkit(path, params=None):
-    def fn():
-        base = (env("LISTENINGKIT_BASE_URL", required=False) or "https://log.listeningkit.com").rstrip("/")
-        r = httpx.get(base + path,
-                      params=params, timeout=60, headers={"Authorization": f"Bearer {env('LISTENINGKIT_API_KEY')}"})
-        r.raise_for_status()
-        return r.json()
-
-    return _call(_json_key("listeningkit", path, params), 0.0, "listeningkit", fn)
-
-
 def _deepline(argv):
     p = subprocess.run(argv, capture_output=True, text=True)
     if p.returncode:
@@ -370,8 +359,7 @@ def selftest():
     _reset(cap=1.0, dry=True)
     assert getleads("POST", "/api/v1/enrich/from-linkedin", json={}, usd=0.4, label="gl") is None
     assert apify("u~a", {}, 0.4) is None
-    assert listeningkit("/x") is None
-    assert SPENT["usd"] == 0.0 and len(SPENT["calls"]) == 3 and all(c["planned"] for c in SPENT["calls"])
+    assert SPENT["usd"] == 0.0 and len(SPENT["calls"]) == 2 and all(c["planned"] for c in SPENT["calls"])
     try:
         deepline_action("some_action", {}, 0.4); raise AssertionError("dry-run cap not enforced")
     except SpendCapExceeded:

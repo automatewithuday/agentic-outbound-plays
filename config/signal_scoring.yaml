@@ -15,7 +15,7 @@ freshness_days:
 bands:
   work_today: 80
   sequence_this_week: 40
-listeningkit:
-  min_score: 70
-  platforms: [reddit, x, facebook]
+social_intent:
+  platforms: [x, reddit, hackernews, bluesky]  # Deepline search tools; see Play 2 step 6
+  max_age_days: 14
 max_score: 100

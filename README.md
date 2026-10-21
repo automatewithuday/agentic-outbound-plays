@@ -55,7 +55,7 @@ Catch-all and unknown never go to Smartlead. Wait for my approval before pushing
 **Steps**
 1. Start from `data/tam.csv` (`company_domain,company_name`); build it with GetLeads `search_companies` if you have none. Signals only rank a list.
 2. Collect third-party signals into `out/signals.csv` (`company_domain,signal_type,party,event_date,source_url,detail`): funding by discovery with Deepline `crustdata_v3_company_search` (companies that raised in the last 28 days in your size band and country, 0.02 credits per result; ICP-fit ones join the TAM) and, for accounts already in the TAM, `predictleads_company_financing_events` (0.56 credits per call) or GetLeads `list_funding_signals` (1 credit per record; often empty), reading each source link; hiring with Apify `harvestapi~linkedin-job-search` via `common.apify`, job changes with `count_contacts` then `search_contacts` (only accounts already at 40+), optional news with Deepline `predictleads_company_news_events` (0.56 credits per call).
-3. Optional social intent: Log by ListeningKit MCP (`claude mcp add listeningkit -- https://log.listeningkit.com/mcp --header "Authorization: Bearer <key>"`, or self-host from https://github.com/matthewdonsemail-lab/log). `list_matches(min_score, platform)` for your pain keywords. Reddit, X and Facebook only; no LinkedIn. Confirm each company with `lookup_company`.
+3. Optional social intent with Deepline's search tools (no extra account): X `twitterapi_advanced_search` (0.003 credits per result), Reddit `scrapecreators_reddit_search` (0.02 per call), Hacker News `hackernews_search` and Bluesky `bluesky_search_posts` (free). Run your pain keywords, keep buyers asking for help in the last 14 days, map the author to a company, and add `social_intent` rows.
 4. Add first-party rows (`data/crm_export.csv` closed-lost and stalled, `data/transcripts/`, Play 5 visits, Play 3 engagement on your posts) and second-party rows (partner-post engagement, Play 4 champions).
 5. Score: `uv run python -m outbound.score_signals data/tam.csv --signals out/signals.csv --out out/accounts_scored.csv`. Weights are 40 first-party, 25 second-party, 10 third-party, capped at 100, from `config/signal_scoring.yaml` (edit it with your own reply and meeting data). Bands: `work_today` 80+, `sequence_this_week` 40 to 79, `nurture` below 40. Events outside their freshness window (for example funding within 28 days, hiring within 14, job change 14 to 45) are dropped.
 6. For `work_today` accounts, `lookup_decision_makers(domain, limit 5)` and keep 2 buyers per account by your `CLAUDE.md` titles; run `outbound.waterfall` only on rows with no valid email. Show the table; nothing sends.
@@ -64,7 +64,7 @@ Catch-all and unknown never go to Smartlead. Wait for my approval before pushing
 ```
 Run the Play 2 skill. Use data/tam.csv (build it with search_companies if missing). Collect funding (list_funding_signals, last 28 days,
 verify each source link), hiring (Apify harvestapi~linkedin-job-search), job changes (count_contacts then search_contacts for 40+ accounts),
-optional news and ListeningKit social intent into out/signals.csv. Add first-party rows from data/crm_export.csv and data/transcripts/
+optional news and Deepline social intent (X, Reddit, HN, Bluesky) into out/signals.csv. Add first-party rows from data/crm_export.csv and data/transcripts/
 and second-party rows from partner posts and Play 4 champions. Keep only signals inside the windows in config/signal_scoring.yaml, drop
 duplicates, then run uv run python -m outbound.score_signals data/tam.csv --signals out/signals.csv --out out/accounts_scored.csv.
 For work_today accounts find 2 buyers each by CLAUDE.md titles. State the cost before every paid step. Show me the table. Send nothing until I approve.
@@ -206,7 +206,7 @@ linkedin_url, and each lead gets email from one tool only. Send nothing until I 
 | Play | Article (ColdIQ) | This repo |
 |---|---|---|
 | 1 | `find_email` | GetLeads → LeadMagic → Prospeo → FullEnrich (each via Deepline tools), verified by MillionVerifier / BounceBan (`outbound.waterfall`) |
-| 2 | `find_signals` | GetLeads signals and `search_contacts`, Apify job search, optional ListeningKit, `outbound.score_signals` |
+| 2 | `find_signals` | GetLeads signals and `search_contacts`, Apify job search, Deepline X/Reddit/HN/Bluesky search, `outbound.score_signals` |
 | 3 | `extract_post_engagement` + Trigify monitoring | Deepline `prebuilt/linkedin-post-to-engagers-harvestapi`, GetLeads `add_monitored_profile` |
 | 4 | Job-change signals | Deepline `prebuilt/job-change-check` |
 | 5 | `setup_website_visitors` | GetLeads website pixel and `export_website_visitor_leads` |

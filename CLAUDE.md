@@ -1,4 +1,4 @@
-# Martechs Outbound System
+# Agentic Outbound Plays
 
 Five outbound Plays in Claude Code, ordered cold to hot: Play 1 waterfall email finder, Play 2 signal scoring, Play 3 LinkedIn post engagers, Play 4 champion reactivation, Play 5 website visitors. Everything drafts; nothing sends without explicit approval. Skills in `.claude/skills/` read this file and pass values to scripts as CLI flags.
 

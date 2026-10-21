@@ -389,14 +389,14 @@ def selftest():
     assert out[0]["verifier"] == "provider" and calls == [] and out[0]["domain_match"] == "no"
     out, _ = go(mk(1), {"f0": cand("v@d0.com")}, {}, {"v@d0.com": V})
     assert out[0]["domain_match"] == "yes"
-    assert _domain_match("eric@clorox.com", "thecloroxcompany.com") == "yes" and _domain_match("a@chagaroot.com", "lakanto.com") == "no"
-    assert _domain_match("k@sunbum.com", "www.sunbum.com") == "yes" and _domain_match("", "x.com") == ""
+    assert _domain_match("eric@example.com", "theexamplecompany.com") == "yes" and _domain_match("a@othercompany.com", "example-foods.com") == "no"
+    assert _domain_match("k@example-sun.com", "www.example-sun.com") == "yes" and _domain_match("", "x.com") == ""
     # provider parsers, fixtures copied from real responses (out/probe/*.json, 21 Oct 2026)
-    lm = {"email": "megan.imbres@onepeloton.com", "status": "valid", "mx_gateway_type": "Cloud Mailbox Host", "mx_security_gateway": False}
-    assert _lm_cand(lm) == {"email": "megan.imbres@onepeloton.com", "provider": "leadmagic", "raw_status": "valid", "mx_class": "Cloud Mailbox Host"}
+    lm = {"email": "ada@example-fitness.com", "status": "valid", "mx_gateway_type": "Cloud Mailbox Host", "mx_security_gateway": False}
+    assert _lm_cand(lm) == {"email": "ada@example-fitness.com", "provider": "leadmagic", "raw_status": "valid", "mx_class": "Cloud Mailbox Host"}
     assert _lm_cand({"email": None, "message": "no match"})["miss_reason"] == "no match" and not _lm_cand(None).get("email")
-    pr = {"person": {"email": {"status": "VERIFIED", "email": "jason.bunge@hasbro.com", "email_mx_provider": "Microsoft"}}}
-    assert _prospeo_cand(pr) == {"email": "jason.bunge@hasbro.com", "provider": "prospeo", "raw_status": "VERIFIED", "mx_class": "Microsoft", "company_domain": ""}
+    pr = {"person": {"email": {"status": "VERIFIED", "email": "grace@example-toys.com", "email_mx_provider": "Microsoft"}}}
+    assert _prospeo_cand(pr) == {"email": "grace@example-toys.com", "provider": "prospeo", "raw_status": "VERIFIED", "mx_class": "Microsoft", "company_domain": ""}
     assert _prospeo_cand({**pr, "company": {"domain": "hasbro.com"}})["company_domain"] == "hasbro.com"
     # a row with no company_domain learns it from the provider; LeadMagic is skipped for such rows
     blank = [{"first_name": "f0", "last_name": "l", "company_domain": "", "linkedin_url": "li0"}]
@@ -416,11 +416,11 @@ def selftest():
     out, _ = go(blank, {}, {"f0": {**cand("e@learned.com", "prospeo"), "company_domain": "learned.com"}}, {"e@learned.com": V})
     assert out[0]["company_domain"] == "learned.com" and out[0]["domain_match"] == "yes"
     assert _resolve(_prospeo_cand(pr)) == ("verified", "provider") and not _prospeo_cand({"person": {"email": None}}).get("email")
-    fe = {"status": "FINISHED", "data": [{"input": {"professional_network_url": "https://www.linkedin.com/in/tulaniandre", "first_name": "Tulani",
-          "last_name": "André", "company_domain": "nationalgeographic.com"}, "contact_info": {"most_probable_work_email": {"email": "t@zalando.de", "status": "HIGH_PROBABILITY"}}}]}
-    fr = _fe_rows(fe); assert fr[0]["email"] == "t@zalando.de" and fr[0]["linkedin_url"].endswith("/tulaniandre")
-    cands = _match("fullenrich", [{"first_name": "Tulani", "last_name": "André", "company_domain": "nationalgeographic.com", "linkedin_url": "https://www.linkedin.com/in/tulaniandre/"}], fe, fr, _fe_cand)
-    assert cands[0]["email"] == "t@zalando.de" and cands[0]["raw_status"] == "HIGH_PROBABILITY" and _norm("HIGH_PROBABILITY") == "unknown"
+    fe = {"status": "FINISHED", "data": [{"input": {"professional_network_url": "https://www.linkedin.com/in/ada-lovelace", "first_name": "Ada",
+          "last_name": "Lovelace", "company_domain": "example-media.com"}, "contact_info": {"most_probable_work_email": {"email": "ada@other-employer.de", "status": "HIGH_PROBABILITY"}}}]}
+    fr = _fe_rows(fe); assert fr[0]["email"] == "ada@other-employer.de" and fr[0]["linkedin_url"].endswith("/ada-lovelace")
+    cands = _match("fullenrich", [{"first_name": "Ada", "last_name": "Lovelace", "company_domain": "example-media.com", "linkedin_url": "https://www.linkedin.com/in/ada-lovelace/"}], fe, fr, _fe_cand)
+    assert cands[0]["email"] == "ada@other-employer.de" and cands[0]["raw_status"] == "HIGH_PROBABILITY" and _norm("HIGH_PROBABILITY") == "unknown"
     assert all(n in FINDERS for n in PROVIDERS.split(","))
     # a provider that raises (billing cap, bad shape) keeps the rows, records why, and the next provider still runs
     c._reset(); calls.clear()

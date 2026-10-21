@@ -160,22 +160,39 @@ def deepline_play(play_id, *, csv_path=None, input=None, usd_estimate=0.0):
     if csv_path:
         payload["csv"] = str(csv_path)
     argv = ["deepline", "plays", "run", play_id, "--input", json.dumps(payload), "--json"]
-    if usd_estimate > 0:  # hard cap enforced by Deepline itself
-        argv += ["--max-credits", str(math.ceil(round(usd_estimate / DEEPLINE_CREDIT_USD, 6)))]
+    # Hard cap enforced by Deepline itself: the REMAINING ledger budget when --cap-usd is set (the estimate is only a
+    # forecast; real rows cost 1-5 credits each), else the estimate. Observed: 8 real rows burned 13 credits.
+    budget = SPENT["cap"] - SPENT["usd"] if SPENT.get("cap") is not None else usd_estimate
+    if budget > 0:
+        argv += ["--max-credits", str(max(1, math.floor(round(budget / DEEPLINE_CREDIT_USD, 6))))]
     # cache on content, not on the temp path in argv
     ident = dict(payload)
     if csv_path:
         ident["csv"] = hashlib.sha256(Path(csv_path).read_bytes()).hexdigest()
 
+    def export_rows(run_id, partial=False):
+        with tempfile.TemporaryDirectory() as td:  # rows live in a dataset: `runs export` is free and returns every row
+            out = Path(td) / "rows.json"
+            _deepline(["deepline", "runs", "export", run_id, "--format", "json", "--out", str(out), "--json", "--allow-empty"])
+            return {"run_id": run_id, "rows": json.loads(out.read_text()), "partial": partial}
+
     def run_and_export():
-        env_ = _deepline(argv)  # `plays run --json` returns a run envelope (run.id, rowOutcomes, datasets), not the rows
+        try:
+            env_ = _deepline(argv)  # `plays run --json` returns a run envelope (run.id, rowOutcomes, datasets), not the rows
+        except RuntimeError as e:
+            m = re.search(r"play/[\w./-]+/run/[\w-]+", str(e))
+            if not m:
+                raise
+            # the run halted (usually Deepline's own --max-credits). Rows it finished are already paid for: salvage them.
+            res = export_rows(m.group(0), partial=True)
+            if not res["rows"]:
+                raise
+            print(f"WARN deepline: run halted ({str(e)[:120]}...); salvaged {len(res['rows'])} rows, unfinished ones stay misses", file=sys.stderr)
+            return res
         run_id = (env_.get("run") or {}).get("id") if isinstance(env_, dict) else None
         if not run_id or not env_.get("datasets"):
             return env_
-        with tempfile.TemporaryDirectory() as td:  # rows live in a dataset: `runs export` is free and returns every row
-            out = Path(td) / "rows.json"
-            _deepline(["deepline", "runs", "export", run_id, "--format", "json", "--out", str(out), "--json"])
-            return {"run_id": run_id, "rows": json.loads(out.read_text())}
+        return export_rows(run_id)
 
     return _call(_json_key("play-rows", play_id, ident), usd_estimate, f"deepline:{play_id}", run_and_export)
 
@@ -184,7 +201,13 @@ def deepline_action(action_id, params, usd_estimate, max_age_days=None):
     # No `deepline actions run` exists in 0.3.397; the equivalent is `deepline tools execute <id> --input <json> --json`.
     # Estimate-only cap (no per-call credit flag).
     argv = ["deepline", "tools", "execute", action_id, "--input", json.dumps(params), "--json"]
-    return _call(_json_key("action", argv), usd_estimate, f"deepline:{action_id}", lambda: _deepline(argv), max_age_days)
+    out = _call(_json_key("action", argv), usd_estimate, f"deepline:{action_id}", lambda: _deepline(argv), max_age_days)
+    # `tools execute --json` wraps the tool's payload in a job envelope {job_id, status: "completed", toolResponse: {rawV2, raw}}.
+    # Return the payload so callers never mistake the job status for a verdict (observed: MillionVerifier result lives in rawV2.result).
+    if isinstance(out, dict) and isinstance(out.get("toolResponse"), dict):
+        tr = out["toolResponse"]
+        return tr.get("rawV2") or tr.get("raw") or tr
+    return out
 
 
 # ---- CSV ----
@@ -349,7 +372,8 @@ def selftest():
     k = []
     assert _call("live", 0.5, "t", lambda: k.append(1) or "r") == "r" and _call("live", 0.5, "t", lambda: 1 / 0) == "r"
     assert SPENT["usd"] == 0.5 and k == [1]
-    # deepline_play: same CSV bytes at two paths -> one call; --max-credits = ceil(usd / DEEPLINE_CREDIT_USD)
+    # deepline_play: same CSV bytes at two paths -> one call; --max-credits = floor(remaining budget / DEEPLINE_CREDIT_USD),
+    # or floor(estimate / price) when no cap is set
     global _deepline
     real_dl, argvs = _deepline, []
     _deepline = lambda argv: argvs.append(argv) or {"rows": []}
@@ -359,10 +383,17 @@ def selftest():
         for d in (d1, d2):
             (d / "in.csv").write_text("a\n1\n")
         deepline_play("pp", csv_path=d1 / "in.csv", usd_estimate=0.25); deepline_play("pp", csv_path=d2 / "in.csv", usd_estimate=0.25)
-        assert len(argvs) == 1 and argvs[0][argvs[0].index("--max-credits") + 1] == "3", argvs  # cache hit across paths; ceil(2.5)
+        assert len(argvs) == 1 and argvs[0][argvs[0].index("--max-credits") + 1] == "2", argvs  # cache hit across paths; floor(2.5)
         (d2 / "in.csv").write_text("a\n2\n"); deepline_play("pp", csv_path=d2 / "in.csv", usd_estimate=0.25)
         assert len(argvs) == 2  # different content -> miss
         deepline_play("free", input={"k": 1}); assert "--max-credits" not in argvs[-1]
+        _reset(cap=2.0); spend(0.5, "x")  # with a cap, the hard limit is the REMAINING budget: (2.0-0.5)/0.10 = 15 credits
+        deepline_play("pp", input={"k": 2}, usd_estimate=0.25); assert argvs[-1][argvs[-1].index("--max-credits") + 1] == "15", argvs[-1]
+        # deepline_action unwraps the job envelope: the caller sees the tool payload, never status="completed"
+        _deepline = lambda argv: {"job_id": "j", "status": "completed", "toolResponse": {"rawV2": {"result": "ok"}, "raw": {"result": "ok"}}}
+        assert deepline_action("mv", {"email": "a@b.c"}, 0.01) == {"result": "ok"}
+        _deepline = lambda argv: {"plain": 1}
+        assert deepline_action("other", {"k": 1}, 0.01) == {"plain": 1}
     finally:
         _deepline = real_dl
     _reset()

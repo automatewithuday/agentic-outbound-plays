@@ -52,6 +52,7 @@ Catch-all and unknown go to the LinkedIn-only track, never Smartlead. Show me th
 - Always `--dry-run` first; a real run needs the user's go-ahead.
 - Spend is capped by the ledger; a cap abort keeps every processed row and marks the rest `cap_aborted`. Report it, never loop around the cap.
 - Catch-all and unknown never enter a live Smartlead sequence (see `CLAUDE.md` Sending).
+- A verifier proves the mailbox exists, not that it is the right person. Rows with `domain_match=no` (email domain unrelated to `company_domain`) are usually a namesake at another company: review them by hand before they go anywhere. Observed on a real 10-row run: 2 of 9 hits.
 - Secrets stay in `.env`; never print them.
 
 ## Common mistakes

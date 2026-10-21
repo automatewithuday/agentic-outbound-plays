@@ -37,14 +37,14 @@ Based on Michel Lieben's article "Here's how to Generate Leads With 5 Agentic Ou
 ```
 Read data/leads.csv, dedupe, run uv run python -m outbound.waterfall data/leads.csv --out out/leads_enriched.csv --batch 150 --dry-run
 and show me the plan. After I approve, run it for real: stop at the first verified email per row, never build an
-email from a naming pattern, write out/leads_enriched.csv (email, email_status, email_provider, verifier, mx_class, miss_reason),
+email from a naming pattern, write out/leads_enriched.csv (email, email_status, email_provider, verifier, mx_class, domain_match, miss_reason),
 and report % verified / % catch-all / % unknown / % not found, hits per provider and spend.
 Catch-all and unknown never go to Smartlead. Wait for my approval before pushing.
 ```
 
 **Why it works:** no single vendor covers every region, so chaining them lifts coverage. GetLeads charges only on a hit, so the cheap first step costs nothing on misses, and the stop rule means you pay for the next provider only when needed.
 
-**What you get:** `out/leads_enriched.csv` with every deduplicated row kept plus the six email columns, and a report with coverage percentages and spend. Aim for bounces under 2%.
+**What you get:** `out/leads_enriched.csv` with every deduplicated row kept plus the seven email columns, and a report with coverage percentages and spend. Aim for bounces under 2%. Hand-check any row with `domain_match=no` before it goes anywhere: the email is real but probably belongs to a namesake at another company.
 
 ## Play 2 · Signal scoring (warm)
 

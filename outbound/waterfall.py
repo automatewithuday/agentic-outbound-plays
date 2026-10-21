@@ -10,7 +10,18 @@ VERIFY_USD = 0.003
 BOUNCEBAN_USD = 0.02
 FULLENRICH_USD = 0.10
 PER_ROW_CAP_USD = 0.15     # default total cap = rows x this, when --cap-usd is not given
-OUT_COLS = ["email", "email_status", "email_provider", "verifier", "mx_class", "miss_reason"]
+OUT_COLS = ["email", "email_status", "email_provider", "verifier", "mx_class", "domain_match", "miss_reason"]
+
+
+def _domain_match(email, company_domain):
+    """'yes' when the email's domain is the company domain (or shares its main label: clorox.com ~ thecloroxcompany.com),
+    'no' otherwise. A verifier proves the mailbox exists, not that it is the right person: review 'no' rows by hand."""
+    ed = (email.rsplit("@", 1)[-1] if email else "").lower().strip()
+    cd = (company_domain or "").lower().strip().removeprefix("www.")
+    if not ed or not cd:
+        return ""
+    e, c = ed.split(".")[0], cd.split(".")[0]
+    return "yes" if ed == cd or (len(e) >= 4 and e in cd) or (len(c) >= 4 and c in ed) else "no"
 
 
 def _norm(raw):
@@ -96,7 +107,14 @@ def find_deepline(rows):
         p = Path(td) / "in.csv"
         c.write_csv(p, rows, ["first_name", "last_name", "company_domain", "linkedin_url"])
         out = c.deepline_play("prebuilt/person-to-email-batch", csv_path=p, usd_estimate=DEEPLINE_FIND_USD * len(rows))
-    return _match("deepline", rows, out, _items(out), lambda d: _cand(d, "deepline"))
+    halted = isinstance(out, dict) and out.get("partial")  # run hit Deepline's cap: unfinished rows are retryable, not misses
+
+    def cand(d):
+        x = _cand(d, "deepline")
+        if halted and not x.get("email") and not x.get("miss_reason"):
+            x["miss_reason"] = "deepline_halted"
+        return x
+    return _match("deepline", rows, out, _items(out), cand)
 
 
 def find_fullenrich(rows):
@@ -113,15 +131,17 @@ def _cand(d, default_provider):
         em = em.get("email")
     if not em:
         return {"miss_reason": d.get("miss_reason")}
+    validated = d.get("email_validated")  # Deepline returns a boolean: True = passed validation before being returned
+    raw = "valid" if validated is True else (None if validated is False else _first(d, "email_status"))
     return {"email": em, "provider": d.get("email_source") or default_provider,
-            "raw_status": _first(d, "email_validated", "email_status"), "miss_reason": d.get("miss_reason"),
-            "mx_class": d.get("email_route")}
+            "raw_status": raw, "miss_reason": d.get("miss_reason"), "mx_class": d.get("email_route")}
 
 
 def verify(email):
     """MillionVerifier; catch_all -> BounceBan once. Returns (status, verifier)."""
     mv = c.deepline_action("millionverifier_verify_email", {"email": email}, VERIFY_USD, max_age_days=30) or {}
-    st = _norm(_first(mv, "email_status", "status"))
+    # MillionVerifier verdict field is `result` (ok | catch_all | invalid | unknown | disposable); never read a job `status`
+    st = _norm(_first(mv, "result", "email_status"))
     if st != "catch_all":
         return st, "millionverifier"
     bb = c.deepline_action("bounceban_verify_single", {"email": email}, BOUNCEBAN_USD, max_age_days=30) or {}
@@ -140,7 +160,7 @@ def _resolve(cand):
 
 def run(rows, finders):
     """rows -> output rows (same order, never dropped). finders: [(name, fn)]; stops at the first non-discard verdict."""
-    res = [{**r, "email": "", "email_status": "not_found", "email_provider": "", "verifier": "", "mx_class": "", "miss_reason": ""} for r in rows]
+    res = [{**r, "email": "", "email_status": "not_found", "email_provider": "", "verifier": "", "mx_class": "", "domain_match": "", "miss_reason": ""} for r in rows]
     pending = list(range(len(rows)))
     try:
         for name, fn in finders:
@@ -170,7 +190,8 @@ def run(rows, finders):
                     res[i]["miss_reason"] = f"{name}:discarded"
                     continue
                 res[i].update(email=cand["email"], email_status=st, email_provider=cand.get("provider") or name,
-                              verifier=ver, mx_class=cand.get("mx_class") or "", miss_reason="")
+                              verifier=ver, mx_class=cand.get("mx_class") or "", miss_reason="",
+                              domain_match=_domain_match(cand["email"], rows[i].get("company_domain")))
                 pending.remove(i)
     except c.SpendCapExceeded as e:
         for i in pending:
@@ -223,7 +244,7 @@ def main(argv=None):
     out, aborted = [], False
     for b in c.batches(ded, a.batch):
         if aborted:  # rows are never dropped
-            out += [{**r, "email": "", "email_status": "not_found", "email_provider": "", "verifier": "", "mx_class": "", "miss_reason": "cap_aborted"} for r in b]
+            out += [{**r, "email": "", "email_status": "not_found", "email_provider": "", "verifier": "", "mx_class": "", "domain_match": "", "miss_reason": "cap_aborted"} for r in b]
             continue
         if a.dry_run:
             c.spend(VERIFY_USD * len(b), "deepline:verify(est)")
@@ -276,9 +297,13 @@ def selftest():
     rows = mk(1); rows[0]["linkedin_url"] = ""
     out, _ = go(rows, {"f0": cand("no@x.com")}, {"f0": cand("d@x.com", "p")}, {"d@x.com": V})
     assert out[0]["email"] == "d@x.com"
-    # provider-declared valid skips the verifier
+    # provider-declared valid skips the verifier; email at another company is flagged domain_match=no
     out, _ = go(mk(1), {"f0": {**cand("v@x.com"), "raw_status": "valid"}}, {}, {})
-    assert out[0]["verifier"] == "provider" and calls == []
+    assert out[0]["verifier"] == "provider" and calls == [] and out[0]["domain_match"] == "no"
+    out, _ = go(mk(1), {"f0": cand("v@d0.com")}, {}, {"v@d0.com": V})
+    assert out[0]["domain_match"] == "yes"
+    assert _domain_match("eric@clorox.com", "thecloroxcompany.com") == "yes" and _domain_match("a@chagaroot.com", "lakanto.com") == "no"
+    assert _domain_match("k@sunbum.com", "www.sunbum.com") == "yes" and _domain_match("", "x.com") == ""
     # a provider that raises (billing cap, bad shape) keeps the rows, records why, and the next provider still runs
     c._reset(); calls.clear()
     def boom(rows): raise RuntimeError("RUN_BILLING_CAP_EXCEEDED")
@@ -291,7 +316,7 @@ def selftest():
     find_getleads, find_deepline, verify = real
     seen2, dl = [], []
     orig = c.deepline_action
-    c.deepline_action = lambda aid, p, u, **k: seen2.append(aid) or ({"status": "catch_all"} if aid.startswith("million") else {"status": "risky"})
+    c.deepline_action = lambda aid, p, u, **k: seen2.append(aid) or ({"result": "catch_all"} if aid.startswith("million") else {"result": "risky"})
     try:
         c._reset()
         out, _ = run(mk(1), [("getleads", fake({"f0": cand("c@x.com")})), ("deepline", lambda r: dl.append(r) or [cand("WRONG@x.com")])])
@@ -329,12 +354,12 @@ def selftest():
     orig = c.deepline_action
     def fa(aid, params, usd, **k):
         seen.append(aid)
-        return {"status": "catch_all"} if aid.startswith("million") else {"status": "risky"}
+        return {"result": "catch_all"} if aid.startswith("million") else {"result": "risky"}
     c.deepline_action = fa
     try:
         c._reset()
         assert verify("c@x.com") == ("catch_all", "millionverifier+bounceban") and seen == ["millionverifier_verify_email", "bounceban_verify_single"]
-        seen.clear(); c.deepline_action = lambda a, p, u, **k: seen.append(a) or {"status": "ok"}
+        seen.clear(); c.deepline_action = lambda a, p, u, **k: seen.append(a) or {"result": "ok"}
         assert verify("o@x.com") == ("verified", "millionverifier") and len(seen) == 1
     finally:
         c.deepline_action = orig

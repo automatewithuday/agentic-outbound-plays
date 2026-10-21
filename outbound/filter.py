@@ -1,5 +1,5 @@
 """Generic CSV filter: --keep-regex, --days, --neq, --suppress, --dedupe-on. Offline; dropped rows go to <out>.dropped.csv."""
-import argparse, io, re, sys, tempfile, contextlib
+import argparse, io, json, re, sys, tempfile, contextlib
 from collections import Counter
 from datetime import date, timedelta
 from pathlib import Path
@@ -36,6 +36,23 @@ def _pair(spec):
     if not a or not b or "," in b:
         raise SystemExit(f"filter: --neq expects colA,colB, got {spec!r}")
     return [a, b]
+
+
+def expand_json_col(rows, col):
+    """{"job_change": '{"status":"moved","date":"2026-01-01"}'} -> adds job_change.status, job_change.date (scalars only; nested
+    objects/lists are left JSON-encoded). Empty or unparseable cells add nothing. Original column is kept."""
+    out = []
+    for r in rows:
+        r = dict(r)
+        try:
+            obj = json.loads(r.get(col) or "")
+        except ValueError:
+            obj = None
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                r[f"{col}.{k}"] = "" if v is None else (v if isinstance(v, str) else json.dumps(v))
+        out.append(r)
+    return out
 
 
 def apply_filters(rows, keep_regex=(), days=(), neq=(), crm_rows=None, dedupe_on=None, today=None):
@@ -89,12 +106,16 @@ def main(argv=None):
     ap.add_argument("--suppress", metavar="CRM.csv")
     ap.add_argument("--dedupe-on", metavar="col1,col2")
     ap.add_argument("--today", metavar="YYYY-MM-DD")
+    ap.add_argument("--json-col", action="append", default=[], metavar="col",
+                    help="expand a JSON-object cell into col.key columns first (Deepline exports nest results, e.g. job_change)")
     a = ap.parse_args(argv)
     if a.selftest:
         return selftest()
     if not a.input or not a.out:
         ap.error("input CSV and --out are required")
     rows = c.read_csv(a.input)
+    for col in a.json_col:
+        rows = expand_json_col(rows, col)
     header = list(dict.fromkeys(k for r in rows for k in r))
     for spec in a.keep_regex + a.days:
         _kv(spec, "--keep-regex/--days")
@@ -171,6 +192,16 @@ def selftest():
     assert "MIN..MAX" in bad("--days", "job_change.date=14") and "MIN..MAX" in bad("--days", "job_change.date=a..b")
     assert "MIN > MAX" in bad("--days", "job_change.date=45..14") and "colA,colB" in bad("--neq", "email")
     assert not (td / "o2.csv").exists()
+    # --json-col expands a Deepline-style nested cell into dotted columns the other flags can read
+    ex = expand_json_col([{"full_name": "T", "job_change": '{"status": "moved", "date": "2026-01-01", "new_company": "Zalando", "experiences": [1], "id": null}'},
+                          {"full_name": "E", "job_change": ""}, {"full_name": "X", "job_change": "not json"}], "job_change")
+    assert ex[0]["job_change.status"] == "moved" and ex[0]["job_change.new_company"] == "Zalando" and ex[0]["job_change.experiences"] == "[1]" and ex[0]["job_change.id"] == ""
+    assert "job_change.status" not in ex[1] and "job_change.status" not in ex[2] and ex[0]["job_change"].startswith("{")
+    d4 = Path(tempfile.mkdtemp()); src = d4 / "jc.csv"; dst = d4 / "mv.csv"
+    c.write_csv(src, ex, ["full_name", "job_change"])
+    with contextlib.redirect_stdout(io.StringIO()):
+        main([str(src), "--json-col", "job_change", "--keep-regex", "job_change.status=^moved$", "--days", "job_change.date=14..400", "--today", "2026-10-21", "--out", str(dst)])
+    assert [r["full_name"] for r in c.read_csv(dst)] == ["T"]
     print("OK")
     return 0
 

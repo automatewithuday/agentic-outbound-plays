@@ -94,7 +94,12 @@ def _call(key, usd, label, fn, max_age_days=None):
 
     def run():
         spend(usd, label)
-        return fn()
+        try:
+            return fn()
+        except Exception:
+            SPENT["usd"] -= usd  # the call failed: nothing was billed, so the ledger must not count it
+            SPENT["calls"].pop()
+            raise
 
     return cached(key, run, max_age_days)
 
@@ -118,10 +123,11 @@ def getleads(method, path, json=None, params=None, usd=0.0, label="getleads"):
 def apify(actor, run_input, max_usd):
     """Run an actor synchronously and return dataset items. actor like 'user~name'. Apify enforces maxTotalChargeUsd."""
     def fn():
+        # token as a query param: verified live 21 Oct 2026 (a Bearer header got 403 on run-sync-get-dataset-items)
         r = httpx.post(f"https://api.apify.com/v2/acts/{actor}/run-sync-get-dataset-items",
-                       params={"maxTotalChargeUsd": max_usd}, json=run_input, timeout=330,
-                       headers={"Authorization": f"Bearer {env('APIFY_API_TOKEN')}"})
-        r.raise_for_status()
+                       params={"maxTotalChargeUsd": max_usd, "token": env("APIFY_API_TOKEN")}, json=run_input, timeout=330)
+        if r.status_code >= 400:  # never let httpx's URL (which carries the token) into the exception text
+            raise RuntimeError(f"apify {actor}: HTTP {r.status_code}: {r.text[:300]}")
         return r.json()
 
     return _call(_json_key("apify", actor, run_input, max_usd), max_usd, f"apify:{actor}", fn)

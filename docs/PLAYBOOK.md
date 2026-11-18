@@ -29,13 +29,13 @@ This is the detailed reference. For the plain-language overview start with the [
 **Steps**
 1. Put `first_name,last_name,company_domain,linkedin_url` in `data/leads.csv` (see `data/leads.example.csv`).
 2. Check `get_fair_use` on the GetLeads MCP, then dry-run: `uv run python -m outbound.waterfall data/leads.csv --out out/leads_enriched.csv --dry-run`.
-3. Run it in batches of 150: GetLeads (LinkedIn URL; charges only on a hit), then LeadMagic (name + domain), then Prospeo (LinkedIn URL + name + domain), then FullEnrich (bulk, async) on whatever is still missing. Change the order with `--providers`.
+3. Run it in batches of 100 (GetLeads takes up to 100 people per enrichment call): GetLeads (LinkedIn URL; charges only on a hit), then LeadMagic (name + domain), then Prospeo (LinkedIn URL + name + domain), then FullEnrich (bulk, async) on whatever is still missing. Change the order with `--providers`.
 4. Every email is verified (MillionVerifier, BounceBan once if catch-all). `verified` stops the waterfall, `catch_all` and `unknown` are stored with their status and stop, `discard` tries the next provider, nothing left is `not_found`.
 5. Read `out/leads_enriched.csv.report.md`. Only `verified` goes to Smartlead; the rest go to a LinkedIn-only track.
 
 **Prompt to paste**
 ```
-Read data/leads.csv, dedupe, run uv run python -m outbound.waterfall data/leads.csv --out out/leads_enriched.csv --batch 150 --dry-run
+Read data/leads.csv, dedupe, run uv run python -m outbound.waterfall data/leads.csv --out out/leads_enriched.csv --batch 100 --dry-run
 and show me the plan. After I approve, run it for real: stop at the first verified email per row, never build an
 email from a naming pattern, write out/leads_enriched.csv (email, email_status, email_provider, verifier, mx_class, domain_match, miss_reason),
 and report % verified / % catch-all / % unknown / % not found, hits per provider and spend.
@@ -191,7 +191,7 @@ linkedin_url, and each lead gets email from one tool only. Send nothing until I 
 ## Guardrails
 
 - First 100 contacts, then inspect before scaling. Test every Play with one company or 5 rows first.
-- Batches of 100 to 200 rows; `/compact` between batches.
+- Batches of 100 rows or fewer; `/compact` between batches.
 - Approvals stay on for anything that sends. Every skill ends with a table, your approval, and only then a push.
 - Spend caps: HARD caps are Deepline plays (`--max-credits`, derived from the estimate via `DEEPLINE_CREDIT_USD` in `common.py`) and Apify (`maxTotalChargeUsd`). ESTIMATE-based caps (the ledger aborts on its own estimate, the vendor does not enforce it) are GetLeads credits (set `GETLEADS_CREDIT_USD`) and Deepline `tools execute` calls. Also `estimate_scrape_cost` before any monitored profile; check `get_fair_use` and `get_wallet_balance` first. Never loop around a cap.
 - Only `verified` emails reach Smartlead. Catch-all and unknown stay out of live sequences. One email tool per lead.

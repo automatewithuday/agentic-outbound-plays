@@ -145,7 +145,7 @@ def _per_row(name, rows, call):
 
 def find_leadmagic(rows):
     """One call per row (name + domain). Each call is cached by its input, so re-runs are free."""
-    # ponytail: sequential subprocess per row (~3 s each); parallelise if 150-row batches feel slow
+    # ponytail: sequential subprocess per row (~3 s each); parallelise if 100-row batches feel slow
     return _per_row("leadmagic", rows, lambda r: _lm_cand(c.deepline_action(
         "leadmagic_email_finder", {"first_name": r["first_name"], "last_name": r["last_name"], "domain": r["company_domain"]}, LEADMAGIC_USD))
         if r.get("company_domain") else {"miss_reason": "leadmagic:needs_domain"})  # name-only lookups are guesses
@@ -308,7 +308,7 @@ def summarize(n_in, n_dedup, out, aborted):
 def main(argv=None):
     ap = c.cli_common(argparse.ArgumentParser(description=__doc__))
     ap.add_argument("input", nargs="?")
-    ap.add_argument("--batch", type=int, default=150)
+    ap.add_argument("--batch", type=int, default=100)  # GetLeads enrichment takes up to 100 items per call
     ap.add_argument("--providers", default=PROVIDERS, help=f"waterfall order, comma list of {','.join(FINDERS)} (default {PROVIDERS})")
     a = ap.parse_args(argv)
     if a.selftest:

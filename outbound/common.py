@@ -303,6 +303,20 @@ def suppress(rows, crm_rows, touched_days=14, today=None):
     return kept, dropped
 
 
+def domain_match(email, company_domain):
+    """'exact' when the email's domain is company_domain (www. ignored); 'partial' when one main label sits inside the other
+    (clorox.com ~ thecloroxcompany.com, but also apple.com ~ pineapple.com); 'no' otherwise; '' when either side is missing.
+    A verifier proves the mailbox exists, not that it is the right person: only 'exact' is pushed without a hand check."""
+    ed = (email.rsplit("@", 1)[-1] if email else "").lower().strip()
+    cd = (company_domain or "").lower().strip().removeprefix("www.")
+    if not ed or not cd:
+        return ""
+    if ed == cd:
+        return "exact"
+    e, d = ed.split(".")[0], cd.split(".")[0]
+    return "partial" if (len(e) >= 4 and e in cd) or (len(d) >= 4 and d in ed) else "no"
+
+
 def batches(rows, size):
     for i in range(0, len(rows), size):
         yield rows[i:i + size]
@@ -330,6 +344,9 @@ def _reset(cap=None, dry=False):
 
 
 def selftest():
+    assert domain_match("k@example-sun.com", "www.example-sun.com") == "exact"
+    assert domain_match("eric@example.com", "theexamplecompany.com") == "partial" and domain_match("a@pineapple.com", "apple.com") == "partial"
+    assert domain_match("a@othercompany.com", "example-foods.com") == "no" and domain_match("", "x.com") == "" and domain_match("a@x.com", "") == ""
     import tempfile
     global CACHE_PATH
     CACHE_PATH = Path(tempfile.mkdtemp()) / "calls.jsonl"

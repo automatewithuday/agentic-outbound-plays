@@ -44,7 +44,7 @@ Catch-all and unknown never go to Smartlead. Wait for my approval before pushing
 
 **Why it works:** no single vendor covers every region, so chaining them lifts coverage. GetLeads charges only on a hit, so the cheap first step costs nothing on misses, and the stop rule means you pay for the next provider only when needed.
 
-**What you get:** `out/leads_enriched.csv` with every deduplicated row kept plus the seven email columns, and a report with coverage percentages and spend. Aim for bounces under 2%. Hand-check any row with `domain_match=no` before it goes anywhere: the email is real but probably belongs to a namesake at another company.
+**What you get:** `out/leads_enriched.csv` with every deduplicated row kept plus the seven email columns, and a report with coverage percentages and spend. Aim for bounces under 2%. `domain_match` is `exact`, `partial`, `no` or blank. Only `exact` rows are pushed as they are. Hand-check every `partial`, `no` or blank row on LinkedIn (the email is real but may belong to a namesake at another company) and set `domain_approved=yes` only on the ones that are the right person.
 
 ## Play 2 · Signal scoring (warm)
 

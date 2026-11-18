@@ -52,14 +52,14 @@ Catch-all and unknown go to the LinkedIn-only track, never Smartlead. Show me th
 - Always `--dry-run` first; a real run needs the user's go-ahead.
 - Spend is capped by the ledger; a cap abort keeps every processed row and marks the rest `cap_aborted`. Report it, never loop around the cap.
 - Catch-all and unknown never enter a live Smartlead sequence (see `CLAUDE.md` Sending).
-- A verifier proves the mailbox exists, not that it is the right person. Rows with `domain_match=no` (email domain unrelated to `company_domain`) are usually a namesake at another company: review them by hand before they go anywhere. Observed on a real 10-row run: 2 of 9 hits.
+- A verifier proves the mailbox exists, not that it is the right person. `domain_match` is `exact` (email domain is `company_domain`), `partial` (one main label inside the other, e.g. clorox.com ~ thecloroxcompany.com, but also apple.com ~ pineapple.com), `no` or blank. `push_smartlead.py` works the match out itself and pushes only `exact` rows, plus rows where the user checked LinkedIn and asked you to set `domain_approved=yes`. Never set `domain_approved` without the user's say-so for that row. Observed on a real 10-row run: 2 of 9 hits were mismatches.
 - Secrets stay in `.env`; never print them.
 
 ## Common mistakes
 
 - Guessing emails from a name pattern (first.last@domain). The script refuses to; do not add it by hand.
 - Reordering `--providers` by habit instead of by the `hits per provider` line of the report: the provider that carries your market should run first.
-- Trusting `domain_match=no` rows: FullEnrich and Prospeo return a real, verified mailbox for the person's *current* employer, which is not always the company on your list.
+- Trusting `partial` or `no` rows: FullEnrich and Prospeo return a real, verified mailbox for the person's *current* employer, which is not always the company on your list.
 - Skipping dedupe, so the same person is paid for twice.
 - Sending `catch_all` or `unknown` rows to Smartlead because the count looks small.
 - Running the full list before looking at the first 10 rows.

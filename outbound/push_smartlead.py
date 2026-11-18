@@ -6,7 +6,9 @@ delete its row from out/pushed_registry.csv.
 A row's own `pushed_to` column: `smartlead` or any OTHER email tool is refused; `heyreach` (LinkedIn) never blocks an email push,
 so LinkedIn plus email for the same person is allowed. --out overrides the registry path (used by the selftest).
 A response that reports fewer accepted leads than sent (added_count < sent) is still recorded as pushed, with a loud WARN:
-Smartlead only skips leads it must never receive again (block list, unsubscribe list, bounce list, duplicate in another campaign)."""
+Smartlead only skips leads it must never receive again (block list, unsubscribe list, bounce list, duplicate in another campaign).
+Domain gate: a row is pushed only when its email domain is exactly its company_domain (worked out here, not read from a column),
+or when a person checked it by hand and set domain_approved=yes on that row. Partial, mismatched or uncheckable rows are refused."""
 import argparse, contextlib, io, json, os, sys, tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -52,8 +54,7 @@ def _lead(r, custom):
     return lead
 
 
-def push(rows, campaign_id, custom=(), allowed=("verified",), dry_run=False, api_key=None, registry=REGISTRY, source_file="",
-         allow_domain_mismatch=False):
+def push(rows, campaign_id, custom=(), allowed=("verified",), dry_run=False, api_key=None, registry=REGISTRY, source_file=""):
     """Return (pushed_rows, refused) where refused is [(row, reason)]. A failed batch (HTTP error) raises RuntimeError (no URL
     or key in it) and that batch is not recorded; a short added_count is recorded and warned about. `registry` accumulates
     every pushed email across runs and input files; its emails are skipped (read in dry runs too)."""
@@ -66,8 +67,8 @@ def push(rows, campaign_id, custom=(), allowed=("verified",), dry_run=False, api
             refused.append((r, "no_email"))
         elif (r.get("email_status") or "").strip().lower() not in allowed:
             refused.append((r, f"status_{r.get('email_status') or 'missing'}"))
-        elif (r.get("domain_match") or "").strip().lower() == "no" and not allow_domain_mismatch:
-            refused.append((r, "domain_mismatch"))  # a real mailbox at another company = probably a namesake; hand-check first
+        elif (dm := c.domain_match(r["email"], r.get("company_domain"))) != "exact" and (r.get("domain_approved") or "").strip().lower() != "yes":
+            refused.append((r, f"domain_{dm or 'unchecked'}:needs_domain_approved"))  # real mailbox, maybe a namesake; hand-check, then domain_approved=yes
         elif tool == "smartlead" or r["email"].strip().lower() in done:
             refused.append((r, "already_pushed:smartlead"))  # any campaign: no double sends; delete its registry row to re-push on purpose
         elif tool and tool != "heyreach":  # heyreach is LinkedIn: never blocks an email push
@@ -117,7 +118,6 @@ def main():
     p.add_argument("--custom", default="", help="comma list of CSV columns sent as custom_fields, e.g. first_line,page_topic")
     p.add_argument("--only-status", default="verified", help="comma list of email_status values to push (default verified)")
     p.add_argument("--allow-status", default="", help="extra statuses to allow, e.g. unknown; never catch_all by default")
-    p.add_argument("--allow-domain-mismatch", action="store_true", help="also push rows whose email domain is unrelated to company_domain (domain_match=no); off by default")
     a = p.parse_args()
     if a.selftest:
         return selftest()
@@ -129,12 +129,15 @@ def main():
     custom = [x.strip() for x in a.custom.split(",") if x.strip()]
     out = a.out or str(REGISTRY)
     try:
-        pushed, refused = push(rows, a.campaign_id, custom, split(a.only_status) + split(a.allow_status), a.dry_run, registry=out, source_file=a.leads,
-                               allow_domain_mismatch=a.allow_domain_mismatch)
+        pushed, refused = push(rows, a.campaign_id, custom, split(a.only_status) + split(a.allow_status), a.dry_run, registry=out, source_file=a.leads)
     except RuntimeError as e:
         sys.exit(f"{e}\nstopped mid-push; earlier batches are recorded in {out}; inspect before re-running (the same command skips them)")
     for r, why in refused:
         print(f"refused {r.get('email') or '<blank>'}: {why}")
+    reasons = {}
+    for _, why in refused:
+        reasons[why] = reasons.get(why, 0) + 1
+    print("skipped by reason: " + (", ".join(f"{k}={v}" for k, v in sorted(reasons.items())) or "none"))
     print(f"{'would push' if a.dry_run else 'pushed'} {len(pushed)} of {len(rows)} rows in {-(-len(pushed) // BATCH)} request(s); refused {len(refused)}; {c.report()}")
     if pushed and not a.dry_run:
         print(f"wrote {out}")
@@ -147,12 +150,14 @@ def selftest():
     real, post = post, lambda url, payload, params=None: calls.append((url, payload, params)) or {"ok": True}
     try:
         c._reset()
-        rows = [{"email": f"p{i}@x.com", "first_name": "A", "last_name": "B", "company_name": "X", "email_status": "verified",
+        rows = [{"email": f"p{i}@x.com", "first_name": "A", "last_name": "B", "company_name": "X", "company_domain": "x.com", "email_status": "verified",
                  "page_topic": f"t{i}", "junk": "no"} for i in range(250)]
         rows += [{"email": "c@x.com", "email_status": "catch_all"}, {"email": "u@x.com", "email_status": "unknown"},
                  {"email": "h@x.com", "email_status": "verified", "pushed_to": "heyreach"},
                  {"email": "s@x.com", "email_status": "verified", "pushed_to": "smartlead"}, {"email": "", "email_status": "verified"},
                  {"email": "o@x.com", "email_status": "verified", "pushed_to": "otheremailtool"}]
+        for r in rows[250:]:
+            r["company_domain"] = "x.com"
         pushed, refused = push(rows, "42", ["page_topic"], ["verified"], api_key="K", registry=None)
         assert [len(p["lead_list"]) for _, p, _ in calls] == [100, 100, 51]  # BATCH enforced
         assert calls[0][0] == "https://server.smartlead.ai/api/v1/campaigns/42/leads" and calls[0][2] == {"api_key": "K"}
@@ -214,11 +219,11 @@ def selftest():
         # refusal via shared registry: another input file with the same email is refused; deleting the registry row re-allows it
         calls.clear(); c._reset()
         with contextlib.redirect_stdout(io.StringIO()):
-            pushed, refused = push([{"email": "p3@x.com", "email_status": "verified"}], "9", registry=reg)
+            pushed, refused = push([{"email": "p3@x.com", "email_status": "verified", "company_domain": "x.com"}], "9", registry=reg)
         assert not pushed and refused[0][1] == "already_pushed:smartlead" and not calls
         c.write_csv(reg, [r for r in c.read_csv(reg) if r["email"] != "p3@x.com"], REG_COLS)
         with contextlib.redirect_stdout(io.StringIO()):
-            pushed, _ = push([{"email": "p3@x.com", "email_status": "verified"}], "9", registry=reg)
+            pushed, _ = push([{"email": "p3@x.com", "email_status": "verified", "company_domain": "x.com"}], "9", registry=reg)
         assert len(pushed) == 1
         # short response: 99 accepted of 100 sent -> WARN, but the batch IS recorded in the registry (skipped leads must never be resent)
         post = lambda url, payload, params=None: {"success": True, "added_count": 99, "skipped_count": 1}
@@ -242,14 +247,18 @@ def selftest():
     finally:
         post = real
         c._reset()
-    # domain_match=no is refused by default (a namesake's real mailbox); --allow-domain-mismatch lets it through
+    # domain gate: only an exact match, or a row a person approved (domain_approved=yes), is pushed; a stale column is ignored
     post = lambda url, payload, params=None: {"ok": True, "upload_count": len(payload["lead_list"])}
-    calls.clear(); c._reset()
-    rows = [{"email": "ns@other.com", "email_status": "verified", "domain_match": "no"}, {"email": "ok@d.com", "email_status": "verified", "domain_match": "yes"}]
-    pushed, refused = push(rows, "42", api_key="K", registry=None)
-    assert [r["email"] for r in pushed] == ["ok@d.com"] and refused[0][1] == "domain_mismatch"
-    pushed, refused = push(rows, "42", api_key="K", registry=None, allow_domain_mismatch=True)
-    assert len(pushed) == 2 and not refused
+    c._reset()
+    rows = [{"email": "ok@d.com", "email_status": "verified", "company_domain": "www.d.com"},
+            {"email": "ns@other.com", "email_status": "verified", "company_domain": "d.com", "domain_match": "yes"},
+            {"email": "a@pineapple.com", "email_status": "verified", "company_domain": "apple.com"},
+            {"email": "nodomain@d.com", "email_status": "verified"},
+            {"email": "ok2@thecloroxcompany.com", "email_status": "verified", "company_domain": "clorox.com", "domain_approved": "Yes"}]
+    with contextlib.redirect_stdout(io.StringIO()):
+        pushed, refused = push(rows, "42", api_key="K", registry=None)
+    assert [r["email"] for r in pushed] == ["ok@d.com", "ok2@thecloroxcompany.com"]
+    assert [w for _, w in refused] == ["domain_no:needs_domain_approved", "domain_partial:needs_domain_approved", "domain_unchecked:needs_domain_approved"]
     print("OK")
 
 

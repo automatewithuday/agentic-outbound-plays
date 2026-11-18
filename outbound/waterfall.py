@@ -17,15 +17,7 @@ PER_ROW_CAP_USD = 0.15     # default total cap = rows x this, when --cap-usd is 
 OUT_COLS = ["email", "email_status", "email_provider", "verifier", "mx_class", "domain_match", "miss_reason"]
 
 
-def _domain_match(email, company_domain):
-    """'yes' when the email's domain is the company domain (or shares its main label: clorox.com ~ thecloroxcompany.com),
-    'no' otherwise. A verifier proves the mailbox exists, not that it is the right person: review 'no' rows by hand."""
-    ed = (email.rsplit("@", 1)[-1] if email else "").lower().strip()
-    cd = (company_domain or "").lower().strip().removeprefix("www.")
-    if not ed or not cd:
-        return ""
-    e, c = ed.split(".")[0], cd.split(".")[0]
-    return "yes" if ed == cd or (len(e) >= 4 and e in cd) or (len(c) >= 4 and c in ed) else "no"
+_domain_match = c.domain_match  # exact / partial / no / blank; see common.domain_match
 
 
 def _norm(raw):
@@ -388,9 +380,9 @@ def selftest():
     out, _ = go(mk(1), {"f0": {**cand("v@x.com"), "raw_status": "valid"}}, {}, {})
     assert out[0]["verifier"] == "provider" and calls == [] and out[0]["domain_match"] == "no"
     out, _ = go(mk(1), {"f0": cand("v@d0.com")}, {}, {"v@d0.com": V})
-    assert out[0]["domain_match"] == "yes"
-    assert _domain_match("eric@example.com", "theexamplecompany.com") == "yes" and _domain_match("a@othercompany.com", "example-foods.com") == "no"
-    assert _domain_match("k@example-sun.com", "www.example-sun.com") == "yes" and _domain_match("", "x.com") == ""
+    assert out[0]["domain_match"] == "exact"
+    assert _domain_match("eric@example.com", "theexamplecompany.com") == "partial" and _domain_match("a@othercompany.com", "example-foods.com") == "no"
+    assert _domain_match("k@example-sun.com", "www.example-sun.com") == "exact" and _domain_match("", "x.com") == ""
     # provider parsers, fixtures copied from real responses (out/probe/*.json, 21 Oct 2026)
     lm = {"email": "ada@example-fitness.com", "status": "valid", "mx_gateway_type": "Cloud Mailbox Host", "mx_security_gateway": False}
     assert _lm_cand(lm) == {"email": "ada@example-fitness.com", "provider": "leadmagic", "raw_status": "valid", "mx_class": "Cloud Mailbox Host"}
@@ -414,7 +406,7 @@ def selftest():
         c.deepline_action = orig
     assert got[0]["miss_reason"].startswith("prospeo:error") and got[1]["email"] == "ok@d1.com"
     out, _ = go(blank, {}, {"f0": {**cand("e@learned.com", "prospeo"), "company_domain": "learned.com"}}, {"e@learned.com": V})
-    assert out[0]["company_domain"] == "learned.com" and out[0]["domain_match"] == "yes"
+    assert out[0]["company_domain"] == "learned.com" and out[0]["domain_match"] == "exact"
     assert _resolve(_prospeo_cand(pr)) == ("verified", "provider") and not _prospeo_cand({"person": {"email": None}}).get("email")
     fe = {"status": "FINISHED", "data": [{"input": {"professional_network_url": "https://www.linkedin.com/in/ada-lovelace", "first_name": "Ada",
           "last_name": "Lovelace", "company_domain": "example-media.com"}, "contact_info": {"most_probable_work_email": {"email": "ada@other-employer.de", "status": "HIGH_PROBABILITY"}}}]}

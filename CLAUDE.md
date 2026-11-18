@@ -37,7 +37,7 @@ Source: `data/crm_export.csv` with columns `email,domain,linkedin_url,stage,in_s
 - Play 4: $5/run
 - Play 5: $5/day
 
-Pass these as `--cap-usd` (Play 1's is per row: multiply by rows). Always `--dry-run` first. Batches of 100-200 rows; `/compact` between batches.
+Pass these as `--cap-usd` (Play 1's is per row: multiply by rows). Always `--dry-run` first. Batches of 100 rows or fewer; `/compact` between batches.
 
 # Conventions
 
